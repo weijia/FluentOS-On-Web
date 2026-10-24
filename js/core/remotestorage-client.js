@@ -98,6 +98,39 @@
         return promise;
     }
 
+    // (A2) 读取某目录下的文件列表（可选按扩展名过滤，如 '.json'）
+    // cfg: { href, token, path, ext }   path 为远程文件夹路径（含结尾 "/"，可省略）
+    // 返回: [{ name, path, etag?, contentType?, contentLength? }]
+    async function listFiles(cfg) {
+        const extPart = cfg.ext ? ('|' + String(cfg.ext).toLowerCase()) : '';
+        const key = cacheKey('files', Object.assign({}, cfg, { path: (cfg.path || '') + extPart }));
+        if (cache.has(key)) return cache.get(key);
+        const url = joinUrl(cfg.href, cfg.path || '/');
+        const promise = (async () => {
+            const listing = await fetchJson(url, cfg.token);
+            const files = [];
+            if (listing && typeof listing === 'object') {
+                const ext = cfg.ext ? String(cfg.ext).toLowerCase() : '';
+                for (const name of Object.keys(listing)) {
+                    if (name.endsWith('/')) continue; // 跳过目录
+                    if (ext && !name.toLowerCase().endsWith(ext)) continue;
+                    const entry = listing[name] || {};
+                    files.push({
+                        name,
+                        path: normalizeHref(cfg.path || '/') + name, // 完整相对路径
+                        etag: entry.ETag || entry.etag || null,
+                        contentType: entry['Content-Type'] || null,
+                        contentLength: (entry['Content-Length'] != null) ? entry['Content-Length'] : null
+                    });
+                }
+            }
+            files.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+            return files;
+        })();
+        cache.set(key, promise);
+        return promise;
+    }
+
     // (B) 读取清单文件并解析为树
     // cfg: { href, token, manifestFile }
     // 返回: { root: { name, type:'folder', children:[] } , meta:{...} }
@@ -148,6 +181,7 @@
         normalizeHref,
         joinUrl,
         listDirectories,
+        listFiles,
         fetchManifest,
         clearCache,
         getConnections,
