@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>目录结构清单生成器 · Dir Struct Generator</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">🗂️</span>
+      <div>
+        <h1>目录结构清单生成器</h1>
+        <p class="subtitle">浏览本机磁盘（此电脑 → 驱动器 → 目录，逐层加载）· 勾选要包含的目录 · 生成 RemoteStorage 清单 JSON</p>
+      </div>
+    </div>
+  </header>
+
+  <section class="options">
+    <label class="opt"><input type="checkbox" id="opt-files" /> 包含文件（仅占位，不读内容）</label>
+    <span id="status" class="status">未选择文件夹</span>
+  </section>
+
+  <main class="layout">
+    <section class="pane tree-pane">
+      <div class="pane-toolbar">
+        <button id="btn-select-all" class="btn btn-sm">全选</button>
+        <button id="btn-deselect-all" class="btn btn-sm">全不选</button>
+        <button id="btn-expand" class="btn btn-sm">展开全部</button>
+        <button id="btn-collapse" class="btn btn-sm">折叠全部</button>
+        <span class="spacer"></span>
+        <span id="count" class="count"></span>
+      </div>
+      <div id="tree" class="tree">
+        <p class="empty-hint">正在列出本机磁盘…</p>
+      </div>
+    </section>
+
+    <section class="pane preview-pane">
+      <div class="pane-toolbar">
+        <strong>清单预览 (JSON)</strong>
+        <span class="spacer"></span>
+        <button id="btn-load-local" class="btn btn-sm">加载本地 JSON</button>
+        <input id="input-load-file" type="file" accept="application/json,.json" hidden />
+        <button id="btn-load-remote" class="btn btn-sm">从 RS 加载</button>
+        <button id="btn-regen" class="btn btn-sm">重新生成</button>
+        <button id="btn-copy" class="btn btn-sm">复制</button>
+        <button id="btn-download" class="btn btn-sm btn-primary">下载 JSON</button>
+      </div>
+      <textarea id="preview" class="preview" readonly placeholder="生成后在此预览清单 JSON…"></textarea>
+    </section>
+  </main>
+
+  <details class="rs-panel">
+    <summary>保存到 RemoteStorage（可选）</summary>
+    <div class="rs-grid">
+      <label>服务器地址 (href)<input id="rs-href" type="text" placeholder="https://storage.example.com/" /></label>
+      <label>Token<input id="rs-token" type="password" placeholder="Bearer token" /></label>
+      <label>基础路径 (basePath)<input id="rs-base" type="text" placeholder="/public/" /></label>
+      <label>清单文件名<input id="rs-file" type="text" placeholder="fs-manifest.json" /></label>
+      <button id="btn-upload" class="btn btn-primary rs-upload">上传到 RemoteStorage</button>
+      <span id="rs-status" class="rs-status"></span>
+    </div>
+  </details>
+
+  <script src="app.js" defer></script>
+</body>
+</html>

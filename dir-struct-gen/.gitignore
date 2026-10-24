@@ -1,0 +1,6 @@
+# 本地持久化的 UI 参数（含 RemoteStorage Token 明文），切勿提交
+app_data/
+
+# 依赖 / 系统文件
+node_modules/
+.DS_Store
