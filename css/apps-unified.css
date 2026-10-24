@@ -1153,3 +1153,64 @@ body.fluent-v2.dark-mode .rs-editor {
 body.fluent-v2.dark-mode .rs-conn-card:hover {
     background: var(--fluent-card-bg-dark-hover) !important;
 }
+
+/* ---------- PWA 更新提示（底部居中 toast） ---------- */
+.pwa-update-toast {
+    position: fixed;
+    left: 50%;
+    bottom: 28px;
+    transform: translateX(-50%);
+    z-index: 99999;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 14px;
+    border-radius: 12px;
+    background: rgba(32, 32, 32, 0.95);
+    color: #fff;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.28);
+    font-size: 13px;
+    animation: pwa-toast-in 0.22s ease-out;
+    max-width: min(92vw, 420px);
+}
+
+.pwa-update-toast .pwa-update-text {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.pwa-update-toast .pwa-update-btn {
+    flex-shrink: 0;
+    border: none;
+    border-radius: 8px;
+    padding: 6px 12px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #fff;
+    background: rgba(255, 255, 255, 0.18);
+    cursor: pointer;
+    transition: background 0.15s ease;
+}
+
+.pwa-update-toast .pwa-update-btn:hover {
+    background: rgba(255, 255, 255, 0.3);
+}
+
+@keyframes pwa-toast-in {
+    from {
+        opacity: 0;
+        transform: translateX(-50%) translateY(10px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateX(-50%) translateY(0);
+    }
+}
+
+body.fluent-v2.dark-mode .pwa-update-toast {
+    background: rgba(50, 50, 50, 0.96) !important;
+    color: #f3f3f3 !important;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5) !important;
+}

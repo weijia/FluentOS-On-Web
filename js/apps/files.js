@@ -188,6 +188,8 @@ const FilesApp = {
                         this.navigateToId('root');
                         return;
                     }
+                    // 配置变更后立即重新拉取远程结构（签名失效的会被强制重载）
+                    this._autoLoadRemoteStructure();
                     this.render();
                 } catch (_) { /* 忽略重建异常 */ }
             }
@@ -1672,6 +1674,8 @@ const FilesApp = {
             // 始终按最新连接重建挂载树（保留已加载态），避免「先开管理器再配连接」或
             // 「关闭重开管理器」时 this.remoteTree 仍是旧的空树导致节点不显示。
             this.remoteTree = this.buildRemoteTree(this.remoteTree);
+            // 自动加载远程结构（仅一层），配置变更后也会因签名失效而重新拉取
+            this._autoLoadRemoteStructure();
             const nonRecycle = children.filter(node => node && node.id !== 'recycle');
             const recycle = children.filter(node => node && node.id === 'recycle');
             // 注入 Remote Storage 挂载节点（若已配置连接）
@@ -1918,6 +1922,8 @@ const FilesApp = {
                 type: 'remotestorage-conn',
                 name: conn.name || conn.href || ('RS ' + conn.id),
                 connectionId: conn.id,
+                // 连接配置签名：配置变化（href/token/basePath/manifestFile）时丢弃旧的已加载态，强制重新加载
+                _sig: this._remoteConfigSignature(conn),
                 children: []
             };
             connNode.children.push({
@@ -1948,21 +1954,61 @@ const FilesApp = {
         return root;
     },
 
+    // 连接配置签名：任一关键字段变化即视为「配置已改」，需要重新拉取远程数据。
+    _remoteConfigSignature(conn) {
+        return [conn.href, conn.token, conn.basePath, conn.manifestFile]
+            .map((v) => String(v == null ? '' : v))
+            .join('|');
+    },
+
+    // 自动触发远程容器的懒加载（仅一层），使「设置好远程存储后」进入即可看到目录结构。
+    _autoLoadRemoteStructure() {
+        if (!this.remoteTree || !Array.isArray(this.remoteTree.children)) return;
+        const targets = [];
+        for (const connNode of this.remoteTree.children) {
+            if (!Array.isArray(connNode.children)) continue;
+            for (const node of connNode.children) {
+                if (node.type !== 'remotestorage-live' && node.type !== 'remotestorage-manifests') continue;
+                if (node._loaded || node._loading || node._error) continue;
+                targets.push(node);
+            }
+        }
+        if (!targets.length) return;
+        // 延迟到下一个宏任务执行：ensureRemoteChildren 内部会调用 renderFileList，
+        // 放在这里直接调用会在 renderFileList 内部造成嵌套重入渲染。
+        setTimeout(() => {
+            for (const node of targets) {
+                if (node._loaded || node._loading || node._error) continue;
+                this.ensureRemoteChildren(node);
+            }
+        }, 0);
+    },
+
     // 把 oldTree 中已加载/加载中的节点状态合并进新树（按 id 匹配），保留展开结果。
     _mergeRemoteState(newNode, oldTree) {
         if (!newNode || !oldTree) return;
         const old = this._findInRemoteTree(oldTree, newNode.id);
+        let preserve = true;
         if (old) {
-            if (old._loading) newNode._loading = true;
-            if (old._error) newNode._error = old._error;
-            if (old._loaded) {
-                newNode._loaded = true;
-                if (Array.isArray(old.children)) newNode.children = old.children;
-                if (old._manifestRoot) newNode._manifestRoot = old._manifestRoot;
-                if (old._manifestChildren) newNode._manifestChildren = old._manifestChildren;
+            // 连接配置变了 ⇒ 旧的已加载数据作废（连同子树），并清掉该连接的请求缓存
+            if (newNode._sig && old._sig && newNode._sig !== old._sig) {
+                preserve = false;
+                if (typeof RemoteStorageClient !== 'undefined' && RemoteStorageClient.clearCache) {
+                    try { RemoteStorageClient.clearCache(newNode.connectionId); } catch (_) { /* 忽略 */ }
+                }
+            }
+            if (preserve) {
+                if (old._loading) newNode._loading = true;
+                if (old._error) newNode._error = old._error;
+                if (old._loaded) {
+                    newNode._loaded = true;
+                    if (Array.isArray(old.children)) newNode.children = old.children;
+                    if (old._manifestRoot) newNode._manifestRoot = old._manifestRoot;
+                    if (old._manifestChildren) newNode._manifestChildren = old._manifestChildren;
+                }
             }
         }
-        if (Array.isArray(newNode.children)) {
+        if (preserve && Array.isArray(newNode.children)) {
             for (const c of newNode.children) this._mergeRemoteState(c, oldTree);
         }
     },

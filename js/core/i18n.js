@@ -506,6 +506,10 @@ const I18n = {
             'settings.rs-test-fail': '连接失败',
             'settings.rs-confirm-delete': '确定删除该连接吗？',
 
+            // PWA 更新提示
+            'pwa.update-available': '发现新版本',
+            'pwa.update-refresh': '点击刷新',
+
             // 照片应用
             'photos.loading': '正在加载 Bing 每日壁纸...',
             'photos.adjust-title': '图片调整',
@@ -1633,6 +1637,10 @@ const I18n = {
             'settings.rs-test-ok': 'Connection successful',
             'settings.rs-test-fail': 'Connection failed',
             'settings.rs-confirm-delete': 'Delete this connection?',
+
+            // PWA update toast
+            'pwa.update-available': 'New version available',
+            'pwa.update-refresh': 'Refresh',
 
             // Photos
             'photos.loading': 'Loading Bing daily wallpapers...',
