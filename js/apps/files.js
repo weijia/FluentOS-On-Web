@@ -19,6 +19,9 @@ const FilesApp = {
     history: [],
     historyIndex: -1,
     selectedItems: [], // 多选项数组
+
+    // Remote Storage 读取侧：运行时虚拟树（不写入持久 FS）
+    remoteTree: null,
     
     // 框选相关
     isSelecting: false,
@@ -162,6 +165,9 @@ const FilesApp = {
         this.currentPath = ['root'];
         this.history = [['root']];
         this.historyIndex = 0;
+
+        // 构建 Remote Storage 运行时虚拟挂载树（根据 settings.remoteStorage.connections）
+        this.remoteTree = this.buildRemoteTree();
         
         // 监听语言切换
         this._langHandler = () => this.render();
@@ -171,6 +177,21 @@ const FilesApp = {
         this._settingsHandler = (updates) => {
             if (updates && Object.prototype.hasOwnProperty.call(updates, 'enableExternalFileImport')) {
                 this.render();
+            }
+            // Remote Storage 连接配置变化：重建挂载树并重渲染（不影响本地 FS）
+            if (updates && Object.prototype.hasOwnProperty.call(updates, 'remoteStorage')) {
+                try {
+                    const rebuilt = this.buildRemoteTree();
+                    const prevConnCount = this.remoteTree
+                        ? this.remoteTree.children.length : 0;
+                    const newConnCount = rebuilt ? rebuilt.children.length : 0;
+                    this.remoteTree = rebuilt;
+                    if (this.currentNode
+                        && (this.isRemoteNode(this.currentNode)
+                            || (this.currentNode.id === 'root' && prevConnCount !== newConnCount))) {
+                        this.render();
+                    }
+                } catch (_) { /* 忽略重建异常 */ }
             }
         };
         this._subscribeState('settingsChange', this._settingsHandler);
@@ -656,20 +677,51 @@ const FilesApp = {
     },
 
     openItemById(id) {
-        const node = State.findNode(id);
+        const node = this.resolveNode(id);
         if (!node) return;
         if (node.type === 'app') {
             WindowManager.openApp(node.appId);
-        } else if (node.type === 'folder') {
+        } else if (this.isFolderNode(node)) {
             this.navigateTo(node);
         } else if (node.type === 'file') {
             this.openFile(node);
+        } else if (this.isRemoteNode(node)) {
+            // 远程只读节点（实时目录/清单下的文件夹）：进入并懒加载
+            this.navigateTo(node);
         }
     },
 
     showContextMenu(x, y, hasTarget) {
         const menu = this._contextMenu;
         if (!menu) return;
+
+        // 远程只读节点：仅提供 打开 / 刷新 / 属性，禁用一切写入操作
+        const contextNode = hasTarget ? this.resolveNode(this.contextTargetId) : this.currentNode;
+        const remoteCtx = !!contextNode && this.isRemoteNode(contextNode);
+        if (remoteCtx || this.isRemoteNode(this.currentNode)) {
+            menu.innerHTML = `
+                <div class="context-menu-item" data-action="open"><img src="Theme/Icon/Symbol_icon/stroke/Folder Open.svg" alt=""><span>${t('files.open')}</span></div>
+                <div class="context-menu-separator"></div>
+                <div class="context-menu-item" data-action="refresh"><img src="Theme/Icon/Symbol_icon/stroke/Refresh.svg" alt=""><span>${t('files.refresh')}</span></div>
+                <div class="context-menu-item" data-action="properties"><img src="Theme/Icon/Symbol_icon/stroke/Information Circle.svg" alt=""><span>${t('files.properties')}</span></div>`;
+            menu.classList.remove('hidden');
+            const prevVis = menu.style.visibility;
+            menu.style.visibility = 'hidden';
+            menu.style.left = `0px`;
+            menu.style.top = `0px`;
+            const rect = menu.getBoundingClientRect();
+            let left = x;
+            let top = y;
+            const vw = window.innerWidth;
+            const vh = window.innerHeight;
+            if (left + rect.width > vw) left = Math.max(0, vw - rect.width - 4);
+            if (top + rect.height > vh) top = Math.max(0, vh - rect.height - 4);
+            menu.style.left = `${left}px`;
+            menu.style.top = `${top}px`;
+            menu.style.visibility = prevVis || '';
+            return;
+        }
+
         const filesList = this.container ? this.container.querySelector('#files-list') : null;
         const totalItems = filesList ? filesList.querySelectorAll('.file-item').length : 0;
         const allSelected = totalItems > 0 && this.selectedItems.length === totalItems;
@@ -768,11 +820,15 @@ const FilesApp = {
     handleContextAction(action) {
         switch (action) {
             case 'refresh':
-                this.renderFileList();
+                if (this.isRemoteNode(this.currentNode)) {
+                    this.refreshRemoteNode(this.currentNode);
+                } else {
+                    this.renderFileList();
+                }
                 break;
             case 'open':
                 if (this.contextTargetId) {
-                    const node = State.findNode(this.contextTargetId);
+                    const node = this.resolveNode(this.contextTargetId);
                     if (node) {
                         if (node.type === 'app') {
                             WindowManager.openApp(node.appId);
@@ -953,6 +1009,10 @@ const FilesApp = {
     },
 
     createFolder() {
+        if (this.isRemoteNode(this.currentNode)) {
+            FluentUI.Toast({ title: t('files.title'), message: t('files.remote-readonly'), type: 'warning' });
+            return;
+        }
         const name = this.generateUniqueName(t('files.new-folder-name'));
         const newNode = { id: `folder-${Date.now()}`, name, type: 'folder', children: [], created: new Date().toISOString(), modified: new Date().toISOString() };
         this.currentNode.children = this.currentNode.children || [];
@@ -967,6 +1027,10 @@ const FilesApp = {
     },
 
     createTextFile() {
+        if (this.isRemoteNode(this.currentNode)) {
+            FluentUI.Toast({ title: t('files.title'), message: t('files.remote-readonly'), type: 'warning' });
+            return;
+        }
         const name = this.generateUniqueName(t('files.new-text-name'), '.txt');
         const newNode = { id: `file-${Date.now()}`, name, type: 'file', content: '', size: 0, created: new Date().toISOString(), modified: new Date().toISOString() };
         this.currentNode.children = this.currentNode.children || [];
@@ -984,8 +1048,12 @@ const FilesApp = {
     },
 
     renameNode(id) {
-        const node = State.findNode(id);
+        const node = this.resolveNode(id);
         if (!node) return;
+        if (this.isRemoteNode(node)) {
+            FluentUI.Toast({ title: t('files.title'), message: t('files.remote-readonly'), type: 'warning' });
+            return;
+        }
 
         const splitFileExt = (name) => {
             const text = String(name || '');
@@ -1382,10 +1450,10 @@ const FilesApp = {
             : undefined;
 
         breadcrumb.innerHTML = '';
-        
+
         let path = [];
         this.currentPath.forEach((id, index) => {
-            const node = State.findNode(id);
+            const node = this.resolveNode(id);
             if (!node) return;
 
             if (index > 0) {
@@ -1484,6 +1552,12 @@ const FilesApp = {
     },
 
     renderFileIconHTML(node) {
+        if (this.isRemoteNode && this.isRemoteNode(node)) {
+            const icon = node.type === 'remotestorage-dir'
+                ? 'Theme/Icon/Symbol_icon/stroke/Folder.svg'
+                : 'Theme/Icon/Symbol_icon/stroke/Cloud.svg';
+            return `<img src="${icon}" alt="${node.name}" draggable="false">`;
+        }
         if (this.isImageNode(node)) {
             const preview = this.getImagePreviewSrc(node);
             if (preview) {
@@ -1545,6 +1619,27 @@ const FilesApp = {
             return;
         }
 
+        // 远程节点：未加载 → 加载态；出错 → 错误态 + 重试；已加载无子项 → 空文件夹
+        if (this.isRemoteNode(this.currentNode) && !this.currentNode._loaded && !this.currentNode._error) {
+            filesList.innerHTML = `<div class="remote-state remote-loading" style="grid-column: 1/-1; text-align: center; color: var(--text-tertiary); padding: 48px;">${t('files.remote-loading')}</div>`;
+            this.updateStatus(0);
+            return;
+        }
+        if (this.isRemoteNode(this.currentNode) && this.currentNode._error) {
+            const err = this.currentNode._error;
+            const msg = (err && err.kind === 'auth') ? t('files.remote-auth-error')
+                : (err && err.kind === 'notfound') ? t('files.remote-notfound')
+                : (t('files.remote-load-fail') + (err && err.message ? '：' + err.message : ''));
+            filesList.innerHTML = `<div class="remote-state remote-error" style="grid-column: 1/-1; text-align: center; color: var(--text-tertiary); padding: 48px;">
+                <div>${msg}</div>
+                <button class="btn btn-sm" data-action="remote-retry" style="margin-top: 12px;">${t('files.refresh')}</button>
+            </div>`;
+            const retryBtn = filesList.querySelector('[data-action="remote-retry"]');
+            if (retryBtn) retryBtn.addEventListener('click', () => this.refreshRemoteNode(this.currentNode));
+            this.updateStatus(0);
+            return;
+        }
+
         if (!this.currentNode.children || this.currentNode.children.length === 0) {
             filesList.innerHTML = `<div style="grid-column: 1/-1; text-align: center; color: var(--text-tertiary); padding: 48px;">${t('files.empty-folder')}</div>`;
             this.updateStatus(0);
@@ -1574,18 +1669,24 @@ const FilesApp = {
         };
 
         const children = this.currentNode.children || [];
-        const displayChildren = (this.currentNode && this.currentNode.id === 'root')
-            ? [
-                ...children.filter(node => node && node.id !== 'recycle'),
-                ...children.filter(node => node && node.id === 'recycle')
-            ]
-            : children;
+        let displayChildren;
+        if (this.currentNode && this.currentNode.id === 'root') {
+            const nonRecycle = children.filter(node => node && node.id !== 'recycle');
+            const recycle = children.filter(node => node && node.id === 'recycle');
+            // 注入 Remote Storage 挂载节点（若已配置连接）
+            const remoteRoot = (this.remoteTree && this.remoteTree.children.length) ? this.remoteTree : null;
+            displayChildren = remoteRoot
+                ? [...nonRecycle, remoteRoot, ...recycle]
+                : [...nonRecycle, ...recycle];
+        } else {
+            displayChildren = children;
+        }
 
         displayChildren.forEach(node => {
             const item = document.createElement('div');
-            item.className = 'file-item';
+            item.className = 'file-item' + (this.isRemoteNode(node) ? ' remote-item' : '');
             item.dataset.id = node.id;
-            item.draggable = true;
+            item.draggable = !this.isRemoteNode(node);
             
             item.innerHTML = `
                 ${this.renderFileIconHTML(node)}
@@ -1719,7 +1820,10 @@ const FilesApp = {
         this.currentPath.push(node.id);
         this.renderFileList();
         this.updateBreadcrumb();
-        
+
+        // 远程节点：进入后按需懒加载子项（实时目录 / 清单）
+        this.onEnterNode(node);
+
         // 更新历史
         this.history = this.history.slice(0, this.historyIndex + 1);
         this.history.push([...this.currentPath]);
@@ -1727,25 +1831,25 @@ const FilesApp = {
     },
 
     navigateToId(id, highlightChildId = null) {
-        const node = State.findNode(id);
-        if (!node || node.type !== 'folder') {
+        const node = this.resolveNode(id);
+        if (!node || !this.isFolderNode(node)) {
             console.error('[FilesApp] navigateToId: 无效节点或非文件夹', id);
             return;
         }
-        
+
         // 特殊处理：root 的直接子节点（desktop, documents, pictures, downloads, recycle）
         const isRootChild = State.fs.root.children && State.fs.root.children.some(c => c.id === id);
         if (isRootChild) {
             this.currentPath = ['root', id];
         } else {
-            const path = this.getPathToNode(id);
+            const path = this.resolvePathToNode(id);
             if (!path) {
                 console.error('[FilesApp] navigateToId: 无法找到路径', id);
                 return;
             }
             this.currentPath = path;
         }
-        
+
         this.currentNode = node;
         
         // 更新历史
@@ -1782,11 +1886,188 @@ const FilesApp = {
         return null;
     },
 
+    // ===================== Remote Storage 读取侧 =====================
+
+    isRemoteNode(node) {
+        return !!(node && typeof node.type === 'string' && node.type.indexOf('remotestorage-') === 0);
+    },
+
+    isFolderNode(node) {
+        return !!(node && (node.type === 'folder' || this.isRemoteNode(node)));
+    },
+
+    getRemoteConnections() {
+        return (typeof RemoteStorageClient !== 'undefined' && RemoteStorageClient.getConnections)
+            ? RemoteStorageClient.getConnections() : [];
+    },
+
+    // 根据 settings.remoteStorage.connections 构建运行时虚拟挂载树
+    buildRemoteTree() {
+        const conns = this.getRemoteConnections();
+        const root = {
+            id: 'remotestorage-root',
+            type: 'remotestorage-mount',
+            name: t('files.remote-storage'),
+            children: []
+        };
+        for (const conn of conns) {
+            const connNode = {
+                id: 'rs-' + conn.id,
+                type: 'remotestorage-conn',
+                name: conn.name || conn.href || ('RS ' + conn.id),
+                connectionId: conn.id,
+                children: []
+            };
+            connNode.children.push({
+                id: connNode.id + '-live',
+                type: 'remotestorage-live',
+                name: t('files.remote-live'),
+                connectionId: conn.id,
+                path: (typeof RemoteStorageClient !== 'undefined' && RemoteStorageClient.normalizeHref)
+                    ? RemoteStorageClient.normalizeHref(conn.basePath || '/')
+                    : (conn.basePath || '/'),
+                _loaded: false, _loading: false, _error: null, children: []
+            });
+            if (conn.manifestFile && String(conn.manifestFile).trim()) {
+                connNode.children.push({
+                    id: connNode.id + '-manifest',
+                    type: 'remotestorage-manifest',
+                    name: t('files.remote-manifest'),
+                    connectionId: conn.id,
+                    manifestFile: conn.manifestFile,
+                    _loaded: false, _loading: false, _error: null,
+                    _manifestRoot: null, children: []
+                });
+            }
+            root.children.push(connNode);
+        }
+        return root;
+    },
+
+    _findInRemoteTree(node, id) {
+        if (!node) return null;
+        if (node.id === id) return node;
+        if (node.children) {
+            for (const child of node.children) {
+                const found = this._findInRemoteTree(child, id);
+                if (found) return found;
+            }
+        }
+        return null;
+    },
+
+    _remotePathToNode(id, node, path) {
+        if (!node) return null;
+        if (typeof path === 'undefined') path = ['root'];
+        if (node.id === id) return [...path, id];
+        if (node.children) {
+            for (const child of node.children) {
+                const result = this._remotePathToNode(id, child, [...path, node.id]);
+                if (result) return result;
+            }
+        }
+        return null;
+    },
+
+    resolveNode(id) {
+        const local = State.findNode(id);
+        if (local) return local;
+        return this._findInRemoteTree(this.remoteTree, id);
+    },
+
+    resolvePathToNode(id) {
+        const local = this.getPathToNode(id);
+        if (local) return local;
+        return this._remotePathToNode(id);
+    },
+
+    _manifestChildToNode(parent, m) {
+        return {
+            id: parent.id + '/' + m.name,
+            type: 'remotestorage-dir',
+            name: m.name,
+            connectionId: parent.connectionId,
+            _source: 'manifest',
+            _loaded: false, _loading: false, _error: null, children: [],
+            _manifestChildren: (m.type === 'folder' || m.type === undefined) ? (m.children || []) : null
+        };
+    },
+
+    // 加载/刷新远程节点的子项（异步）
+    async ensureRemoteChildren(node) {
+        if (!node || !this.isRemoteNode(node)) return;
+        const conn = (typeof RemoteStorageClient !== 'undefined' && RemoteStorageClient.getConnection)
+            ? RemoteStorageClient.getConnection(node.connectionId) : null;
+        if (!conn) {
+            node._error = { kind: 'unknown', message: t('files.remote-no-conn') };
+            node._loading = false;
+            this.renderFileList();
+            return;
+        }
+        // 清单子树：数据已在内存，本地展开（仅目录）
+        if (node.type === 'remotestorage-dir' && node._source === 'manifest') {
+            node.children = (node._manifestChildren || [])
+                .filter((c) => c.type === 'folder' || c.type === undefined)
+                .map((m) => this._manifestChildToNode(node, m));
+            node._loaded = true; node._error = null; node._loading = false;
+            this.renderFileList();
+            return;
+        }
+        node._loading = true; node._error = null;
+        this.renderFileList();
+        try {
+            if (node.type === 'remotestorage-live' || (node.type === 'remotestorage-dir' && node._source === 'live')) {
+                const dirs = await RemoteStorageClient.listDirectories({
+                    href: conn.href, token: conn.token, path: node.path
+                });
+                node.children = dirs.map((d) => ({
+                    id: node.id + '/' + d.name,
+                    type: 'remotestorage-dir',
+                    name: d.name,
+                    connectionId: conn.id,
+                    path: d.path,
+                    _source: 'live',
+                    _loaded: false, _loading: false, _error: null, children: []
+                }));
+            } else if (node.type === 'remotestorage-manifest') {
+                const res = await RemoteStorageClient.fetchManifest({
+                    href: conn.href, token: conn.token, manifestFile: node.manifestFile
+                });
+                node._manifestRoot = res.root;
+                node.children = (res.root.children || [])
+                    .filter((c) => c.type === 'folder' || c.type === undefined)
+                    .map((m) => this._manifestChildToNode(node, m));
+            }
+            node._loaded = true; node._error = null; node._loading = false;
+        } catch (err) {
+            node._loaded = false; node._loading = false;
+            node._error = err && err.kind ? err : { kind: 'unknown', message: (err && err.message) || t('files.remote-load-fail') };
+        }
+        this.renderFileList();
+    },
+
+    onEnterNode(node) {
+        if (!this.isRemoteNode(node)) return;
+        if (node._loaded || node._loading) return;
+        this.ensureRemoteChildren(node);
+    },
+
+    refreshRemoteNode(node) {
+        if (!this.isRemoteNode(node)) return;
+        if (typeof RemoteStorageClient !== 'undefined' && RemoteStorageClient.clearCache) {
+            RemoteStorageClient.clearCache(node.connectionId);
+        }
+        node._loaded = false; node._error = null; node.children = [];
+        this.renderFileList();
+        this.ensureRemoteChildren(node);
+    },
+
     goBack() {
         if (this.historyIndex > 0) {
             this.historyIndex--;
             this.currentPath = [...this.history[this.historyIndex]];
-            this.currentNode = State.findNode(this.currentPath[this.currentPath.length - 1]);
+            this.currentNode = this.resolveNode(this.currentPath[this.currentPath.length - 1]);
+            this.onEnterNode(this.currentNode);
             this.render();
         }
     },
@@ -1795,7 +2076,8 @@ const FilesApp = {
         if (this.historyIndex < this.history.length - 1) {
             this.historyIndex++;
             this.currentPath = [...this.history[this.historyIndex]];
-            this.currentNode = State.findNode(this.currentPath[this.currentPath.length - 1]);
+            this.currentNode = this.resolveNode(this.currentPath[this.currentPath.length - 1]);
+            this.onEnterNode(this.currentNode);
             this.render();
         }
     },
@@ -2017,6 +2299,7 @@ const FilesApp = {
     },
     
     handleFileDrop(data, destinationNode = this.currentNode) {
+        if (this.isRemoteNode(destinationNode)) return; // 远程只读，禁止拖入
         const ids = Array.isArray(data?.ids) ? data.ids : [data?.id];
         const dragIds = [...new Set(ids.filter(id => typeof id === 'string' && id))];
         if (dragIds.length === 0 || !destinationNode || destinationNode.type !== 'folder') return;

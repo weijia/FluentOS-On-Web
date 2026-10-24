@@ -37,6 +37,13 @@
 RemoteStorage 的服务器地址 / Token / 基础路径 / 清单文件名，以及「包含文件」选项，会**自动保存到本地服务**（`PUT /api/settings`，落盘到 `app_data/folders/<主机名>.json`），刷新页面后**自动回填**，无需重填。
 > ⚠️ 该文件含 Token 明文，已被 `dir-struct-gen/.gitignore` 排除，切勿提交。
 
+**默认值**（首次打开、无已存参数时自动填入）：
+- 基础路径 → `/app_data/folders/`
+- 清单文件名 → 本机主机名（`GET /api/drives` 的 `computerId`），形如 `LAPTOP-91PR81Q2`
+- 服务器地址 / Token → 空（需手动填写）；「包含文件」→ 关闭
+
+即上传目标默认为 `<服务器地址>/app_data/folders/<主机名>`。
+
 ## 加载已有清单并展开目录树
 右侧预览区上方有：
 - **加载本地 JSON**：选一个本地 manifest 文件，自动按其中目录**逐级展开本机磁盘树**并**勾选**对应目录（未匹配到的盘符/路径会被跳过）。

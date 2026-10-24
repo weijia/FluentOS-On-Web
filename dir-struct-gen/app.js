@@ -9,7 +9,8 @@
 const $ = (id) => document.getElementById(id);
 
 const state = {
-  root: null, // 此电脑 虚拟根节点（始终存在）
+  root: null,       // 此电脑 虚拟根节点（始终存在）
+  computerId: null, // 本机 ID（主机名），用于清单根与 RS 文件名默认值
 };
 
 const dom = {
@@ -71,6 +72,7 @@ async function loadInitial() {
     const res = await fetch('/api/drives');
     const data = await res.json();
     const computerId = data.computerId || '此电脑';
+    state.computerId = computerId;  // 缓存，供 RS 文件名默认值使用
     state.root.name = computerId;   // manifest 根 = 本机 ID，便于多台电脑区分
     const drives = (data.drives || []).map((d) => {
       const name = d.replace(/[\\/]+$/, ''); // "C:\" -> "C:"
@@ -88,7 +90,7 @@ async function loadInitial() {
 
 /* ---------------- 懒加载：点开一层，向服务器请求下一层 ---------------- */
 
-async function loadChildren(node) {
+async function loadChildren(node, silent = false) {
   if (node.kind !== 'dir' || node._loaded || !node.path) return;
   node._loading = true;
   renderTree(); // 显示「加载中…」
@@ -121,7 +123,9 @@ async function loadChildren(node) {
   } finally {
     node._loading = false;
     renderTree();
-    regenerate();
+    // 程序化批量展开（如加载 JSON）时静默，只在全部完成后统一刷新一次预览，
+    // 避免每展开一层都重盖 generatedAt 时间戳。
+    if (!silent) regenerate();
   }
 }
 
@@ -315,21 +319,21 @@ function buildManifest(node, includeFiles) {
   return out;
 }
 
-function generateManifest() {
+function generateManifest(genAt) {
   const includeFiles = dom.optFiles.checked;
   const rootManifest = buildManifest(state.root, includeFiles);
   return {
     version: 1,
-    generatedAt: new Date().toISOString(),
+    generatedAt: genAt || new Date().toISOString(),
     generator: 'fluentos-dir-struct-gen',
     source: state.root.name,
     root: rootManifest,
   };
 }
 
-function regenerate() {
+function regenerate(genAt) {
   if (!state.root) return;
-  const manifest = generateManifest();
+  const manifest = generateManifest(genAt);
   dom.preview.value = JSON.stringify(manifest, null, 2);
   updateCount();
 }
@@ -449,17 +453,23 @@ async function saveSettings() {
   } catch (_) { /* 保存失败不阻塞操作 */ }
 }
 async function loadSettings() {
+  let s = {};
   try {
     const res = await fetch('/api/settings');
-    const s = await res.json();
-    if (s && typeof s === 'object') {
-      if (s.rsHref != null) dom.rsHref.value = s.rsHref;
-      if (s.rsToken != null) dom.rsToken.value = s.rsToken;
-      if (s.rsBase != null) dom.rsBase.value = s.rsBase;
-      if (s.rsFile != null) dom.rsFile.value = s.rsFile;
-      if (typeof s.optFiles === 'boolean') dom.optFiles.checked = s.optFiles;
-    }
-  } catch (_) { /* 没有已存参数则忽略 */ }
+    s = await res.json();
+  } catch (_) { /* 没有已存参数则使用默认值 */ }
+
+  // 回填已保存的 RemoteStorage 参数；无保存值时给默认值。
+  dom.rsHref.value = (s && s.rsHref != null) ? s.rsHref : '';
+  dom.rsToken.value = (s && s.rsToken != null) ? s.rsToken : '';
+  // 基础路径默认 /app_data/folders/，清单文件名默认用本机主机名。
+  dom.rsBase.value = (s && s.rsBase != null) ? s.rsBase : '/app_data/folders/';
+  let fileDefault = state.computerId;
+  if (!fileDefault) {
+    try { const d = await (await fetch('/api/drives')).json(); fileDefault = d.computerId; } catch (_) {}
+  }
+  dom.rsFile.value = (s && s.rsFile != null) ? s.rsFile : (fileDefault || 'fs-manifest');
+  dom.optFiles.checked = (s && typeof s.optFiles === 'boolean') ? s.optFiles : false;
 }
 
 /* ---------------- 加载外部 JSON 并展开目录树 ---------------- */
@@ -505,11 +515,11 @@ async function applyManifest(manifest) {
   setStatus('正在按清单展开目录…');
 
   async function applyNode(mNode, liveNode) {
-    // 加载该层（加载前先取消勾选，避免子项被继承勾选）
+    // 加载该层（加载前先取消勾选，避免子项被继承勾选）；静默展开，最后统一刷新预览。
     if (liveNode.kind === 'dir' && !liveNode._loaded && liveNode.path) {
       const prev = liveNode.checked;
       liveNode.checked = false;
-      await loadChildren(liveNode);
+      await loadChildren(liveNode, true);
       liveNode.checked = prev;
     }
     liveNode._selected = true;
@@ -534,7 +544,8 @@ async function applyManifest(manifest) {
 
   recompute(state.root);
   renderTree();
-  regenerate();
+  // 保留原 JSON 的 generatedAt（若没有则使用当前时间），而不是用「加载时刻」覆盖。
+  regenerate(manifest.generatedAt);
   setStatus('已根据清单展开并勾选目录（未匹配到的盘符/路径已跳过）。');
 }
 

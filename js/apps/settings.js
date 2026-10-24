@@ -136,6 +136,7 @@ const SettingsApp = {
             { id: 'overview', label: 'settings.overview', icon: 'Home', desc: t('settings.overview-desc') },
             { id: 'user', label: 'settings.user', icon: 'User Circle', desc: t('settings.user-desc') },
             { id: 'network', label: 'settings.network', icon: 'Globe', desc: t('settings.network-desc') },
+            { id: 'remote-storage', label: 'settings.remote-storage', icon: 'Cloud', desc: t('settings.remote-storage-desc') },
             { id: 'personalization', label: 'settings.personalization', icon: 'Color Picker', desc: t('settings.personalization-desc') },
             { id: 'applications', label: 'settings.applications', icon: 'Inbox Download', desc: t('settings.applications-desc') },
             { id: 'multitask', label: 'settings.multitask', icon: 'Dashboard Check', desc: t('settings.multitask-desc') },
@@ -2506,6 +2507,9 @@ const SettingsApp = {
             case 'network':
                 this.renderNetwork(container);
                 break;
+            case 'remote-storage':
+                this.renderRemoteStoragePage(container);
+                break;
             case 'personalization':
                 this.renderPersonalization(container);
                 break;
@@ -3323,7 +3327,220 @@ const SettingsApp = {
         
         container.appendChild(networkList);
     },
-    
+
+    // ===================== Remote Storage 连接管理 =====================
+
+    getRSConnections() {
+        const rs = (State.settings && State.settings.remoteStorage) || {};
+        return Array.isArray(rs.connections) ? rs.connections : [];
+    },
+
+    writeRSConnections(connections) {
+        const rs = Object.assign({}, (State.settings && State.settings.remoteStorage) || {});
+        rs.connections = connections;
+        State.updateSettings({ remoteStorage: rs });
+    },
+
+    renderRemoteStoragePage(container) {
+        container.className = 'settings-content settings-remote-storage';
+        container.innerHTML = '';
+
+        const header = document.createElement('div');
+        header.className = 'settings-page-header';
+        header.innerHTML = `
+            <div class="settings-page-header-icon"><img src="Theme/Icon/Symbol_icon/stroke/Cloud.svg" alt=""></div>
+            <div>
+                <h1>${t('settings.remote-storage')}</h1>
+                <p>${t('settings.remote-storage-desc')}</p>
+            </div>`;
+        container.appendChild(header);
+
+        const listSection = this.createSection(t('settings.remote-storage'));
+        const connList = document.createElement('div');
+        connList.className = 'rs-conn-list';
+        listSection.appendChild(connList);
+
+        const addBtn = FluentUI.Button({
+            text: t('settings.rs-add'),
+            variant: 'accent',
+            icon: 'Plus Circle',
+            onClick: () => this.openRSEditor(container, connList, null)
+        });
+        listSection.appendChild(addBtn);
+        container.appendChild(listSection);
+
+        this.renderRSConnectionList(connList, container);
+    },
+
+    renderRSConnectionList(connList, pageContainer) {
+        connList.innerHTML = '';
+        const conns = this.getRSConnections();
+        if (conns.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'rs-empty';
+            empty.innerHTML = `
+                <img src="Theme/Icon/Symbol_icon/stroke/Cloud.svg" alt="">
+                <p>${t('settings.rs-no-conn')}</p>
+                <span>${t('settings.rs-no-conn-desc')}</span>`;
+            connList.appendChild(empty);
+            return;
+        }
+        conns.forEach((conn) => {
+            const card = document.createElement('div');
+            card.className = 'rs-conn-card' + (conn.enabled === false ? ' rs-disabled' : '');
+
+            const main = document.createElement('div');
+            main.className = 'rs-conn-main';
+            const metaBits = [];
+            if (conn.href) metaBits.push(conn.href);
+            if (conn.manifestFile) metaBits.push(t('files.remote-manifest') + ': ' + conn.manifestFile);
+            main.innerHTML = `
+                <div class="rs-conn-name">${conn.name || conn.href || ('RS ' + conn.id)}</div>
+                <div class="rs-conn-meta">${metaBits.join('  ·  ')}</div>`;
+            card.appendChild(main);
+
+            const actions = document.createElement('div');
+            actions.className = 'rs-conn-actions';
+            actions.appendChild(FluentUI.IconButton({
+                icon: 'Edit', title: t('settings.rs-edit'), size: 'small',
+                onClick: () => this.openRSEditor(pageContainer, connList, conn.id)
+            }));
+            actions.appendChild(FluentUI.IconButton({
+                icon: 'Trash', title: t('settings.rs-delete'), size: 'small',
+                onClick: () => this.deleteRSConnection(pageContainer, connList, conn.id)
+            }));
+            card.appendChild(actions);
+
+            const toggle = FluentUI.Toggle({
+                checked: conn.enabled !== false,
+                onChange: (v) => {
+                    const list = this.getRSConnections().map((c) => c.id === conn.id ? Object.assign({}, c, { enabled: v }) : c);
+                    this.writeRSConnections(list);
+                }
+            });
+            card.appendChild(toggle);
+
+            connList.appendChild(card);
+        });
+    },
+
+    openRSEditor(pageContainer, connList, connId) {
+        const existing = connId ? this.getRSConnections().find((c) => c.id === connId) : null;
+        const model = existing
+            ? Object.assign({}, existing)
+            : {
+                id: 'rs-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+                name: '', href: '', token: '', basePath: '/app_data/folders/', manifestFile: '', enabled: true
+            };
+
+        const oldEditor = pageContainer.querySelector('.rs-editor');
+        if (oldEditor) oldEditor.remove();
+
+        const editor = document.createElement('div');
+        editor.className = 'rs-editor settings-section';
+        editor.innerHTML = `<div class="settings-section-title">${existing ? t('settings.rs-edit') : t('settings.rs-add')}</div>`;
+
+        const form = document.createElement('div');
+        form.className = 'rs-editor-form';
+
+        const mkField = (key, labelKey, phKey) => {
+            const item = document.createElement('div');
+            item.className = 'rs-field';
+            const label = document.createElement('label');
+            label.textContent = t(labelKey);
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.className = 'fluent-input';
+            input.value = model[key] != null ? String(model[key]) : '';
+            if (phKey) input.placeholder = t(phKey);
+            input.addEventListener('input', () => { model[key] = input.value; });
+            label.appendChild(input);
+            item.appendChild(label);
+            return item;
+        };
+
+        form.appendChild(mkField('name', 'settings.rs-name', 'settings.rs-name-ph'));
+        form.appendChild(mkField('href', 'settings.rs-href', 'settings.rs-href-ph'));
+        form.appendChild(mkField('token', 'settings.rs-token', 'settings.rs-token-ph'));
+        form.appendChild(mkField('basePath', 'settings.rs-basePath', 'settings.rs-basePath-ph'));
+        form.appendChild(mkField('manifestFile', 'settings.rs-manifest', 'settings.rs-manifest-ph'));
+
+        const enabRow = document.createElement('div');
+        enabRow.className = 'rs-field rs-field-inline';
+        const enabLabel = document.createElement('label');
+        enabLabel.textContent = t('settings.rs-enabled');
+        const enabToggle = FluentUI.Toggle({
+            checked: model.enabled !== false,
+            onChange: (v) => { model.enabled = v; }
+        });
+        enabRow.appendChild(enabLabel);
+        enabRow.appendChild(enabToggle);
+        form.appendChild(enabRow);
+
+        const btnRow = document.createElement('div');
+        btnRow.className = 'rs-editor-actions';
+
+        const testBtn = FluentUI.Button({
+            text: t('settings.rs-test'), variant: 'secondary', icon: 'Wifi',
+            onClick: async () => {
+                testBtn.disabled = true;
+                try {
+                    if (typeof RemoteStorageClient === 'undefined') throw new Error('client unavailable');
+                    await RemoteStorageClient.listDirectories({ href: model.href, token: model.token, path: model.basePath || '/' });
+                    FluentUI.Toast({ title: t('settings.remote-storage'), message: t('settings.rs-test-ok'), type: 'success' });
+                } catch (err) {
+                    const msg = (err && err.kind === 'auth') ? t('files.remote-auth-error')
+                        : (err && err.kind === 'notfound') ? t('files.remote-notfound')
+                        : (t('settings.rs-test-fail') + (err && err.message ? '：' + err.message : ''));
+                    FluentUI.Toast({ title: t('settings.remote-storage'), message: msg, type: 'error' });
+                } finally {
+                    testBtn.disabled = false;
+                }
+            }
+        });
+        const saveBtn = FluentUI.Button({
+            text: t('settings.rs-save'), variant: 'accent', icon: 'Check Circle',
+            onClick: () => {
+                if (!String(model.href || '').trim()) {
+                    FluentUI.Toast({ title: t('settings.remote-storage'), message: t('settings.rs-href') + ' ' + t('settings.rs-name-ph'), type: 'warning' });
+                    return;
+                }
+                const list = this.getRSConnections().slice();
+                const idx = list.findIndex((c) => c.id === model.id);
+                if (idx >= 0) list[idx] = Object.assign({}, list[idx], model);
+                else list.push(Object.assign({}, model));
+                this.writeRSConnections(list);
+                editor.remove();
+                this.renderRSConnectionList(connList, pageContainer);
+                FluentUI.Toast({ title: t('settings.remote-storage'), message: t('settings.rs-saved'), type: 'success' });
+            }
+        });
+        const cancelBtn = FluentUI.Button({
+            text: t('settings.rs-cancel'), variant: 'secondary',
+            onClick: () => editor.remove()
+        });
+
+        btnRow.appendChild(testBtn);
+        btnRow.appendChild(cancelBtn);
+        btnRow.appendChild(saveBtn);
+        form.appendChild(btnRow);
+
+        editor.appendChild(form);
+        pageContainer.appendChild(editor);
+        editor.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        const firstInput = editor.querySelector('input');
+        if (firstInput) firstInput.focus();
+    },
+
+    deleteRSConnection(pageContainer, connList, connId) {
+        if (!window.confirm(t('settings.rs-confirm-delete'))) return;
+        const list = this.getRSConnections().filter((c) => c.id !== connId);
+        this.writeRSConnections(list);
+        if (typeof RemoteStorageClient !== 'undefined' && RemoteStorageClient.clearCache) RemoteStorageClient.clearCache(connId);
+        this.renderRSConnectionList(connList, pageContainer);
+        FluentUI.Toast({ title: t('settings.remote-storage'), message: t('settings.rs-deleted'), type: 'success' });
+    },
+
     // 时间和语言页面
     renderTimeLanguage(container) {
         // 时间设置
