@@ -3,7 +3,7 @@
  *
  * 主要用途：为「网页更新检测 + 用户提示刷新」提供载体（PWA）。
  *
- * 版本戳：2.6.261027a（每次发版必须 bump 本行，否则浏览器逐字节对比 sw.js 不会触发 update）
+ * 版本戳：2.6.261027b（每次发版必须 bump 本行，否则浏览器逐字节对比 sw.js 不会触发 update）
  *
  * 设计要点：
  *   1) importScripts 引入 js/core/resource-manifest.js（由 scripts/generate-resource-manifest.ps1 生成）。

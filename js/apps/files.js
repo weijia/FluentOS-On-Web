@@ -263,14 +263,19 @@ const FilesApp = {
     },
 
     getQuickAccessItems() {
-        return [
+        const items = [
             { id: 'desktop', label: t('files.desktop'), icon: 'Folder' },
             { id: 'documents', label: t('files.documents'), icon: 'File' },
             { id: 'pictures', label: t('files.pictures'), icon: 'Image' },
             { id: 'music', label: t('files.music'), icon: 'Music' },
-            { id: 'downloads', label: t('files.downloads'), icon: 'Download' },
-            { id: 'recycle', label: t('files.recycle'), icon: 'Trash' }
+            { id: 'downloads', label: t('files.downloads'), icon: 'Download' }
         ];
+        // 远程存储：仅在已配置连接时出现在侧边栏，点击直接进入远程挂载根节点
+        if (this.getRemoteConnections().length) {
+            items.push({ id: 'remotestorage-root', label: t('files.remote-storage'), icon: 'Cloud' });
+        }
+        items.push({ id: 'recycle', label: t('files.recycle'), icon: 'Trash' });
+        return items;
     },
 
     getCurrentQuickAccessId() {
