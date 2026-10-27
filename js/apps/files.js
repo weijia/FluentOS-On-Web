@@ -2073,6 +2073,13 @@ const FilesApp = {
     // 加载/刷新远程节点的子项（异步）
     async ensureRemoteChildren(node) {
         if (!node || !this.isRemoteNode(node)) return;
+        // 挂载根节点与连接节点：children 在 buildRemoteTree 里已按本地配置构建好，无需网络请求，
+        // 直接标记为已加载即可（之前这里直接去 getConnection(undefined) 导致「找不到对应的连接配置」）。
+        if (node.type === 'remotestorage-mount' || node.type === 'remotestorage-conn') {
+            node._loaded = true; node._error = null; node._loading = false;
+            this.renderFileList();
+            return;
+        }
         const conn = (typeof RemoteStorageClient !== 'undefined' && RemoteStorageClient.getConnection)
             ? RemoteStorageClient.getConnection(node.connectionId) : null;
         if (!conn) {

@@ -11,7 +11,8 @@ const SettingsApp = {
     _developerModeVisible: false,
     // 与当前仓库 git log 同步；同一天的提交共同组成一个日期版本。
     aboutChangelog: [
-        { date: '2026-10-27', version: '2.6.261027', commits: [
+        { date: '2026-10-27', version: '2.6.261027a', commits: [
+            { hash: 'local', title: '修复远程存储挂载根节点进入时提示「找不到对应的连接配置」（mount/conn 节点本地构建，无需网络请求）。' },
             { hash: '3c5ae09', title: '修复 RemoteStorage 目录不显示：State 引用错误 + listing items 解包' },
             { hash: '856569a', title: '新增 PWA 自动更新检测与刷新提示（新版本可用 Toast），文件管理器自动加载远程目录结构' },
             { hash: 'be84380', title: '修复文件管理器远程存储节点不显示，自动扫描 basePath 下 .json 清单文件' },
