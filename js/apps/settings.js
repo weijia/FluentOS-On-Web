@@ -11,7 +11,8 @@ const SettingsApp = {
     _developerModeVisible: false,
     // 与当前仓库 git log 同步；同一天的提交共同组成一个日期版本。
     aboutChangelog: [
-        { date: '2026-10-27', version: '2.6.261027b', commits: [
+        { date: '2026-10-28', version: '2.6.261028', commits: [
+            { hash: 'local', title: '修复点击侧边栏「远程存储」后仍显示桌面：远程节点路径解析入口未默认从远程树根开始；导航进入远程节点时自动触发懒加载。' },
             { hash: 'local', title: '文件管理器侧边栏新增「远程存储」快捷入口，点击直接进入远程挂载根节点浏览目录树。' },
             { hash: 'local', title: '修复远程存储挂载根节点进入时提示「找不到对应的连接配置」（mount/conn 节点本地构建，无需网络请求）。' },
             { hash: '3c5ae09', title: '修复 RemoteStorage 目录不显示：State 引用错误 + listing items 解包' },

@@ -1861,15 +1861,20 @@ const FilesApp = {
         }
 
         this.currentNode = node;
-        
+
         // 更新历史
         this.history = this.history.slice(0, this.historyIndex + 1);
         this.history.push([...this.currentPath]);
         this.historyIndex++;
-        
+
         this.renderFileList();
         this.updateBreadcrumb();
         this.updateSidebarActive();
+        // 通过侧边栏/面包屑导航进入远程节点时，触发懒加载（挂载根/连接节点本地构建即完成，
+        // 清单/实时节点需要拉取远程数据）
+        if (this.isRemoteNode(node) && !node._loaded && !node._loading) {
+            this.ensureRemoteChildren(node);
+        }
         // 若需要高亮某个子项
         if (highlightChildId) {
             this._scheduleTimeout(() => {
@@ -2039,6 +2044,8 @@ const FilesApp = {
     },
 
     _remotePathToNode(id, node, path) {
+        // 入口调用（resolvePathToNode）不传 node 时，默认从远程挂载根开始遍历
+        if (!node) node = this.remoteTree;
         if (!node) return null;
         if (typeof path === 'undefined') path = ['root'];
         if (node.id === id) return [...path, id];
