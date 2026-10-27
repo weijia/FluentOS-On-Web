@@ -67,6 +67,15 @@
         }
     }
 
+    // RemoteStorage 目录 listing 响应按 spec 是 { "@context": ..., "items": { "name/": {...}, "file": {...} } }。
+    // 有些私有实现会直接把条目平铺在顶层；两种格式都兼容：优先取 items，否则用顶层对象本身。
+    function unwrapListing(listing) {
+        if (listing && typeof listing === 'object' && listing.items && typeof listing.items === 'object') {
+            return listing.items;
+        }
+        return (listing && typeof listing === 'object') ? listing : {};
+    }
+
     // (A) 读取某目录下的子目录列表
     // cfg: { href, token, path }  path 为远程文件夹路径（含结尾 "/"，可省略）
     // 返回: [{ name, path, isDirectory:true, etag? }]
@@ -76,19 +85,18 @@
         const url = joinUrl(cfg.href, cfg.path || '/');
         const promise = (async () => {
             const listing = await fetchJson(url, cfg.token);
+            const entries = unwrapListing(listing);
             const dirs = [];
-            if (listing && typeof listing === 'object') {
-                for (const name of Object.keys(listing)) {
-                    if (name.endsWith('/')) {
-                        const sub = name.slice(0, -1);
-                        const entry = listing[name] || {};
-                        dirs.push({
-                            name: sub,
-                            path: normalizeHref(cfg.path || '/') + name, // 含结尾 "/"
-                            isDirectory: true,
-                            etag: entry.ETag || entry.etag || null
-                        });
-                    }
+            for (const name of Object.keys(entries)) {
+                if (name.endsWith('/')) {
+                    const sub = name.slice(0, -1);
+                    const entry = entries[name] || {};
+                    dirs.push({
+                        name: sub,
+                        path: normalizeHref(cfg.path || '/') + name, // 含结尾 "/"
+                        isDirectory: true,
+                        etag: entry.ETag || entry.etag || null
+                    });
                 }
             }
             dirs.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
@@ -108,21 +116,20 @@
         const url = joinUrl(cfg.href, cfg.path || '/');
         const promise = (async () => {
             const listing = await fetchJson(url, cfg.token);
+            const entries = unwrapListing(listing);
             const files = [];
-            if (listing && typeof listing === 'object') {
-                const ext = cfg.ext ? String(cfg.ext).toLowerCase() : '';
-                for (const name of Object.keys(listing)) {
-                    if (name.endsWith('/')) continue; // 跳过目录
-                    if (ext && !name.toLowerCase().endsWith(ext)) continue;
-                    const entry = listing[name] || {};
-                    files.push({
-                        name,
-                        path: normalizeHref(cfg.path || '/') + name, // 完整相对路径
-                        etag: entry.ETag || entry.etag || null,
-                        contentType: entry['Content-Type'] || null,
-                        contentLength: (entry['Content-Length'] != null) ? entry['Content-Length'] : null
-                    });
-                }
+            const ext = cfg.ext ? String(cfg.ext).toLowerCase() : '';
+            for (const name of Object.keys(entries)) {
+                if (name.endsWith('/')) continue; // 跳过目录
+                if (ext && !name.toLowerCase().endsWith(ext)) continue;
+                const entry = entries[name] || {};
+                files.push({
+                    name,
+                    path: normalizeHref(cfg.path || '/') + name, // 完整相对路径
+                    etag: entry.ETag || entry.etag || null,
+                    contentType: entry['Content-Type'] || null,
+                    contentLength: (entry['Content-Length'] != null) ? entry['Content-Length'] : null
+                });
             }
             files.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
             return files;
@@ -161,9 +168,12 @@
     }
 
     // 从 State.settings 读取连接配置（供上层便捷调用）
+    // 注意：state.js 用 `const State = {...}` 顶层声明，不会挂到 window 上；
+    // 必须用裸 State 引用（全局词法环境），不能用 global.State / window.State（它们是 undefined）。
     function getConnections() {
         try {
-            const rs = (global.State && global.State.settings && global.State.settings.remoteStorage) || {};
+            const s = (typeof State !== 'undefined') ? State : global.State;
+            const rs = (s && s.settings && s.settings.remoteStorage) || {};
             const list = rs.connections || [];
             return list.filter((c) => c && c.enabled !== false);
         } catch (_) {
