@@ -11,6 +11,12 @@ const SettingsApp = {
     _developerModeVisible: false,
     // 与当前仓库 git log 同步；同一天的提交共同组成一个日期版本。
     aboutChangelog: [
+        { date: '2026-10-27', version: '2.6.261027', commits: [
+            { hash: '3c5ae09', title: '修复 RemoteStorage 目录不显示：State 引用错误 + listing items 解包' },
+            { hash: '856569a', title: '新增 PWA 自动更新检测与刷新提示（新版本可用 Toast），文件管理器自动加载远程目录结构' },
+            { hash: 'be84380', title: '修复文件管理器远程存储节点不显示，自动扫描 basePath 下 .json 清单文件' },
+            { hash: '53c2104', title: '文件管理器接入 RemoteStorage：支持实时目录浏览与目录清单（manifest）展开' }
+        ] },
         { date: '2026-08-02', version: '2.5.260802', commits: [
             { hash: 'local', title: '进一步优化了触控体验，临时修复 AI Skill 文档下载问题。' },
             { hash: '7b60c1b', title: '本次更新完善了开发者中心自建 App 功能，新增 AI Skill 下载、三问式需求澄清、中英文自动适配、API 文档首次引导及打开提醒；权限改为安装后按需认证并记忆允许或拒绝结果；统一修复设置二级页面的返回按钮、羽化栏、弹性滚动和侧边栏高亮；同时加入全局触控优化，支持流畅手势滚动、长按呼出右键菜单，以及开始菜单长按 1 秒后才可拖动 App。' }

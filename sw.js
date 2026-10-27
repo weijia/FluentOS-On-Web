@@ -3,6 +3,8 @@
  *
  * 主要用途：为「网页更新检测 + 用户提示刷新」提供载体（PWA）。
  *
+ * 版本戳：2.6.261027（每次发版必须 bump 本行，否则浏览器逐字节对比 sw.js 不会触发 update）
+ *
  * 设计要点：
  *   1) importScripts 引入 js/core/resource-manifest.js（由 scripts/generate-resource-manifest.ps1 生成）。
  *      任何 js / css / Theme 文件被修改后重新生成清单 ⇒ 浏览器检测到 SW 依赖脚本变化 ⇒ 触发 updatefound，
