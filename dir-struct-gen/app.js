@@ -75,8 +75,13 @@ async function loadInitial() {
     state.computerId = computerId;  // 缓存，供 RS 文件名默认值使用
     state.root.name = computerId;   // manifest 根 = 本机 ID，便于多台电脑区分
     const drives = (data.drives || []).map((d) => {
-      const name = d.replace(/[\\/]+$/, ''); // "C:\" -> "C:"
-      return makeNode(name, 'dir', d, state.root);
+      const root = typeof d === 'string' ? d : d.root;
+      const rawName = typeof d === 'string' ? d : (d.letter || d.root);
+      const name = (rawName || '').replace(/[\\/]+$/, '') || rawName || '';
+      const node = makeNode(name, 'dir', root, state.root);
+      // 盘的稳定身份（来自磁盘根的 .dir-struct-id）；取不到则为 null（回退按主机+盘符）。
+      node.volumeId = typeof d === 'string' ? null : (d.volumeId || null);
+      return node;
     });
     drives.sort((a, b) => a.name.localeCompare(b.name));
     state.root.children = drives;
@@ -315,6 +320,9 @@ function buildManifest(node, includeFiles) {
   // 标签（自动 + 手动，去重）合并进清单，便于读取侧按标签筛选/展示。
   const merged = [...new Set([...(node.tags || []), ...(node.manualTags || [])])];
   const out = { name: node.name, type: 'folder', children };
+  // 驱动层节点带稳定 volumeId（来自磁盘根 .dir-struct-id），供读取侧去重 / 命名深挖标记；
+  // 子目录不重复携带，靠祖先驱动节点溯源即可。
+  if (node.volumeId) out.volumeId = node.volumeId;
   if (merged.length) out.tags = merged;
   return out;
 }
@@ -381,7 +389,7 @@ async function copyJSON() {
   }
 }
 
-/* ---------------- 上传到 RemoteStorage ---------------- */
+/* ---------------- 按卷拆分上传 + 深挖标记应用 ---------------- */
 
 function joinUrl(href, path) {
   const h = href.endsWith('/') ? href : href + '/';
@@ -389,27 +397,187 @@ function joinUrl(href, path) {
   return h + p;
 }
 
+// RemoteStorage 路径里只允许安全字符，其余替换为下划线（如 HostA::C: → HostA__C_）。
+function sanitizeKey(s) {
+  return (s || '').replace(/[^A-Za-z0-9._-]/g, '_');
+}
+
+// 一块盘的共享键：有 volumeId 用 volumeId（跨主机去重），否则回退 主机::盘符。
+function volumeKeyFor(drive) {
+  return drive.volumeId || (state.computerId + '::' + drive.name);
+}
+
+// 读取某块盘的深挖标记（app_data/folder-deepen/<key>.json）。
+async function loadDeepenMarks(key) {
+  const href = dom.rsHref.value.trim();
+  const token = dom.rsToken.value.trim();
+  const base = dom.rsBase.value.trim() || '/';
+  if (!href || !token) return [];
+  const url = joinUrl(joinUrl(href, base), 'folder-deepen/' + sanitizeKey(key) + '.json');
+  try {
+    const res = await fetch(url, { headers: { 'Authorization': 'Bearer ' + token } });
+    if (!res.ok) return [];
+    const obj = await res.json().catch(() => null);
+    const marks = obj && Array.isArray(obj.marks) ? obj.marks : [];
+    return marks.filter((m) => typeof m === 'string');
+  } catch (_) { return []; }
+}
+
+// 消耗某块盘的深挖标记（清空为 {marks:[]}，写回同一文件）。
+async function clearDeepenMarks(key) {
+  const href = dom.rsHref.value.trim();
+  const token = dom.rsToken.value.trim();
+  const base = dom.rsBase.value.trim() || '/';
+  if (!href || !token) return;
+  const url = joinUrl(joinUrl(href, base), 'folder-deepen/' + sanitizeKey(key) + '.json');
+  try {
+    await fetch(url, {
+      method: 'PUT',
+      headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ marks: [] }),
+    });
+  } catch (_) { /* 清理失败不阻断 */ }
+}
+
+// 把 host-relative 标记路径（"E:/Photos/2024"）还原成段数组，去掉盘符。
+function markPathSegs(driveName, p) {
+  const cleaned = String(p)
+    .replace(/^[A-Za-z]:[\\/]?/, '')
+    .replace(/^\/+/, '');
+  return cleaned.split(/[\\/]+/).filter(Boolean);
+}
+
+// 沿路径逐层加载，最终对目标目录多读一层磁盘，使其出现在清单里。
+async function ensureDeepened(drive, segs) {
+  let cur = drive;
+  for (const seg of segs) {
+    if (!cur._loaded) await loadChildren(cur, true);
+    const child = cur.children.find((c) => c.kind === 'dir' && c.name === seg);
+    if (!child) return false; // 路径在磁盘上不存在
+    cur = child;
+  }
+  if (!cur._loaded) await loadChildren(cur, true); // 多读一层
+  return true;
+}
+
+// 应用全部深挖标记：读取 → 逐块盘深挖 → 消耗标记。返回统计。
+async function applyDeepenMarks() {
+  let total = 0;
+  const warns = [];
+  for (const drive of state.root.children) {
+    if (drive.kind !== 'dir') continue;
+    const key = volumeKeyFor(drive);
+    const marks = await loadDeepenMarks(key);
+    if (!marks.length) continue;
+    // 迭代最多 5 轮：处理「标记目录的子目录也被标记」的嵌套情形。
+    let pending = marks.map((p) => markPathSegs(drive.name, p));
+    for (let round = 0; round < 5 && pending.length; round++) {
+      const remain = [];
+      for (const segs of pending) {
+        const ok = await ensureDeepened(drive, segs);
+        if (!ok) remain.push(segs);
+      }
+      if (remain.length === pending.length) {
+        // 无进展（路径不存在等），停止避免死循环。
+        for (const s of remain) warns.push(drive.name + '/' + s.join('/'));
+        break;
+      }
+      pending = remain;
+    }
+    total += marks.length;
+    await clearDeepenMarks(key);
+  }
+  return { total, warns };
+}
+
+// 按 name 并集合并两棵卷子树（不同主机对同一块盘的选择累加）。
+function mergeVolumeTrees(existing, incoming) {
+  const exChildren = Array.isArray(existing.children) ? existing.children : [];
+  const inChildren = Array.isArray(incoming.children) ? incoming.children : [];
+  const map = new Map();
+  for (const c of exChildren) map.set(c.name, c);
+  for (const c of inChildren) {
+    if (map.has(c.name)) map.set(c.name, mergeVolumeTrees(map.get(c.name), c));
+    else map.set(c.name, c);
+  }
+  return { ...existing, children: [...map.values()] };
+}
+
 async function uploadToRS() {
   if (!state.root) { setRS('请先生成清单。', false); return; }
   const href = dom.rsHref.value.trim();
   const token = dom.rsToken.value.trim();
   const base = dom.rsBase.value.trim() || '/';
-  const file = dom.rsFile.value.trim() || 'fs-manifest.json';
+  const file = dom.rsFile.value.trim() || state.computerId || 'fs-manifest';
   if (!href || !token) { setRS('请填写服务器地址与 Token。', false); return; }
 
-  const url = joinUrl(joinUrl(href, base), file);
-  setRS('上传中…', null);
+  setRS('正在应用深挖标记…', null);
   try {
-    const res = await fetch(url, {
-      method: 'PUT',
-      headers: {
-        'Authorization': 'Bearer ' + token,
-        'Content-Type': 'application/json',
-      },
-      body: dom.preview.value,
+    // 1) 应用深挖标记（按需多读磁盘层），并刷新预览。
+    const { total, warns } = await applyDeepenMarks();
+    regenerate();
+
+    const manifest = generateManifest();
+
+    // 2) 主机索引：只记录「本机挂了哪些盘、挂在哪个盘符、稳定身份是什么」。
+    const mounts = manifest.root.children.map((d) => {
+      const vkey = volumeKeyFor(d);
+      return { letter: d.name, volumeId: d.volumeId || null, file: sanitizeKey(vkey) };
     });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    setRS('上传成功：' + url, true);
+    const hostIndex = {
+      version: 2,
+      source: manifest.source,
+      generatedAt: manifest.generatedAt,
+      generator: manifest.generator,
+      mounts,
+    };
+
+    // 3) 逐块盘：拆分出独立卷文件，与远端已有卷文件并集合并（多主机选择累加）后上传。
+    const headers = { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' };
+    let uploaded = 0;
+    for (const d of manifest.root.children) {
+      if (d.kind !== 'dir') continue;
+      const vkey = volumeKeyFor(d);
+      const fname = sanitizeKey(vkey);
+      const incoming = {
+        volumeId: d.volumeId || null,
+        name: d.name,
+        type: 'folder',
+        children: d.children,
+        sources: [manifest.source],
+      };
+      // 拉取已有卷文件（可能由其他主机上传过同一块盘）。
+      let existing = null;
+      try {
+        const g = await fetch(joinUrl(joinUrl(href, base), fname + '.json'), {
+          headers: { 'Authorization': 'Bearer ' + token },
+        });
+        if (g.ok) existing = await g.json().catch(() => null);
+      } catch (_) { /* 远端无该卷文件 → 直接上传 */ }
+      const merged = existing && Array.isArray(existing.children)
+        ? mergeVolumeTrees(existing, incoming)
+        : incoming;
+      const srcSet = new Set([
+        ...(existing && Array.isArray(existing.sources) ? existing.sources : []),
+        ...incoming.sources,
+      ]);
+      merged.sources = [...srcSet];
+
+      const vurl = joinUrl(joinUrl(href, base), fname + '.json');
+      const vres = await fetch(vurl, { method: 'PUT', headers, body: JSON.stringify(merged, null, 2) });
+      if (!vres.ok) throw new Error('HTTP ' + vres.status + ' (' + fname + ')');
+      uploaded++;
+    }
+
+    // 4) 上传主机索引。
+    const hurl = joinUrl(joinUrl(href, base), sanitizeKey(file) + '.json');
+    const hres = await fetch(hurl, { method: 'PUT', headers, body: JSON.stringify(hostIndex, null, 2) });
+    if (!hres.ok) throw new Error('HTTP ' + hres.status + ' (host index)');
+
+    let msg = '上传成功：' + uploaded + ' 个卷 + 主机索引';
+    if (total) msg += '（已应用 ' + total + ' 个深挖标记）';
+    if (warns.length) msg += '；未匹配路径：' + warns.join(', ');
+    setRS(msg, true);
   } catch (err) {
     setRS('上传失败：' + err.message, false);
   }

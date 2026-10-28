@@ -16,6 +16,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 
 const ROOT = __dirname;
@@ -95,6 +96,48 @@ function detectTags(names) {
 
 /* ---------------- local filesystem helpers ---------------- */
 
+// 磁盘稳定身份标记文件：首次见到某块盘时在其根目录写入一个 UUID，
+// 之后所有系统读到的都是同一串字节 → 跨 OS / 跨协议（含云盘）一致，
+// 从根本上避免「同一块盘在不同主机上被当成不同盘」导致的重复数据。
+const VOLUME_MARKER = '.dir-struct-id';
+
+function normalizeRoot(root) {
+  return (root || '').replace(/[\\/]+$/, '');
+}
+
+function ensureVolumeId(root) {
+  const r = normalizeRoot(root);
+  if (!r) return null;
+  const marker = path.join(r, VOLUME_MARKER);
+  // 1) 已存在标记文件 → 直接读回（跨系统同一串字节）
+  try {
+    const existing = fs.readFileSync(marker, 'utf8').trim();
+    if (/^[0-9a-fA-F-]{8,}$/.test(existing)) return existing;
+  } catch (_) { /* 还没有标记文件 */ }
+  // 2) 没有 → 生成一个 UUID 写回（首次见到这块盘）
+  try {
+    const id = crypto.randomUUID();
+    fs.writeFileSync(marker, id);
+    try {
+      // Windows：加隐藏属性，避免污染资源管理器视图
+      if (process.platform === 'win32') {
+        execFileSync('attrib', ['+h', marker], { windowsHide: true, timeout: 3000 });
+      }
+    } catch (_) { /* 隐藏属性可选，忽略 */ }
+    return id;
+  } catch (_) {
+    // 3) 读不到也写不了（只读盘 / 无权限，如系统根 /、CD-ROM）→ 回退按主机+盘符
+    return null;
+  }
+}
+
+// 把盘根路径规整成「驱动对象」，附带稳定的 volumeId。
+function driveObj(root) {
+  const r = normalizeRoot(root);
+  const letter = r || root;
+  return { letter, root: r, volumeId: ensureVolumeId(r) };
+}
+
 function listDrives() {
   const platform = process.platform;
   if (platform === 'win32') {
@@ -106,7 +149,7 @@ function listDrives() {
         { timeout: 8000, windowsHide: true }
       ).toString();
       const drives = out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
-      if (drives.length) return drives;
+      if (drives.length) return drives.map(driveObj);
     } catch (_) { /* fall through to probing */ }
     // Fallback: probe A–Z drive letters.
     const found = [];
@@ -117,22 +160,22 @@ function listDrives() {
         found.push(letter + ':\\');
       } catch (_) { /* not a ready drive */ }
     }
-    return found;
+    return found.map(driveObj);
   }
   if (platform === 'darwin') {
     try {
       const vols = fs.readdirSync('/Volumes').filter((v) => v !== '.DS_Store');
-      return ['/'].concat(vols.map((v) => '/Volumes/' + v));
+      return ['/'].concat(vols.map((v) => '/Volumes/' + v)).map(driveObj);
     } catch (_) {
-      return ['/'];
+      return ['/'].map(driveObj);
     }
   }
   // linux / other
   try {
     const mnt = fs.readdirSync('/mnt');
-    return ['/'].concat(mnt.map((m) => '/mnt/' + m));
+    return ['/'].concat(mnt.map((m) => '/mnt/' + m)).map(driveObj);
   } catch (_) {
-    return ['/'];
+    return ['/'].map(driveObj);
   }
 }
 
@@ -140,6 +183,8 @@ function listDir(p) {
   const dirents = fs.readdirSync(p, { withFileTypes: true });
   const items = [];
   for (const e of dirents) {
+    // 过滤掉磁盘身份标记文件，避免它污染目录树 / 清单。
+    if (e.name === VOLUME_MARKER) continue;
     let isDir = false;
     let isSymlinkDir = false;
     if (e.isDirectory()) {
