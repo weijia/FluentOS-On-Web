@@ -22,6 +22,9 @@ const { execFileSync } = require('child_process');
 const ROOT = __dirname;
 const PORT = 8000;
 
+// 程序版本号：用于页面上方展示，方便识别当前运行的是哪一版代码。
+const APP_VERSION = '1.6.0';
+
 // 持久化的 UI 参数（RemoteStorage 等）存放目录。
 // 默认放在本应用目录下 app_data/folders/，文件名即主机名；如需改用真实 /app_data 绝对路径，改这里即可。
 const APP_DATA_DIR = path.join(ROOT, 'app_data', 'folders');
@@ -187,9 +190,45 @@ function listDrives() {
   }
 }
 
-function listDir(p) {
-  const dirents = fs.readdirSync(p, { withFileTypes: true });
+// 给一个 Promise 加超时；超时抛错。用于兜住极慢/不可达目录（如网络挂载盘、
+// 或 Node readdirSync 在某盘上会阻塞几十秒的目录），避免单线程 serve 被拖死。
+function withTimeout(promise, ms) {
+  return Promise.race([
+    promise,
+    new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms)),
+  ]);
+}
+
+// 探测某子目录：判断「是否有子目录」（叶子判定）+ 自动打标签。
+// 全部用 fs.promises（libuv 线程池），不阻塞事件循环；并对单个探测加超时：
+// 极慢/不可读目录缺省按「有子目录」处理（保留展开按钮），不让它拖死整个响应。
+async function probeDir(p, name) {
+  const fallback = { tags: [], hasSubdir: true };
+  let sub;
+  try {
+    sub = await withTimeout(fs.promises.readdir(path.join(p, name), { withFileTypes: true }), 1500);
+  } catch (_) { return fallback; }
+  const tags = detectTags(sub.map((s) => s.name));
+  let hasSubdir = false;
+  for (const s of sub) {
+    if (s.isDirectory()) { hasSubdir = true; break; }
+    if (s.isSymbolicLink()) {
+      try { if ((await fs.promises.stat(path.join(p, name, s.name))).isDirectory()) { hasSubdir = true; break; } }
+      catch (_) {}
+    }
+  }
+  return { tags, hasSubdir };
+}
+
+async function listDir(p) {
+  let dirents;
+  try {
+    dirents = await withTimeout(fs.promises.readdir(p, { withFileTypes: true }), 4000);
+  } catch (err) {
+    throw Object.assign(new Error('readdir failed'), { code: err.code || 'E_TIMEOUT_OR_IO' });
+  }
   const items = [];
+  const jobs = [];
   for (const e of dirents) {
     // 过滤掉磁盘身份标记文件，避免它污染目录树 / 清单。
     if (e.name === VOLUME_MARKER) continue;
@@ -199,25 +238,19 @@ function listDir(p) {
       isDir = true;
     } else if (e.isSymbolicLink()) {
       try {
-        isSymlinkDir = fs.statSync(path.join(p, e.name)).isDirectory();
-      } catch (_) {
-        isSymlinkDir = false;
-      }
+        isSymlinkDir = (await fs.promises.stat(path.join(p, e.name))).isDirectory();
+      } catch (_) { isSymlinkDir = false; }
     }
     if (isDir || isSymlinkDir) {
-      // 自动打标签：仅对真实目录读取其「直接子项名」做一次轻量探测，
-      // 失败（无权限 / 不可读）则不打标签，不影响目录本身列出。
-      let tags = [];
-      if (isDir) {
-        try {
-          tags = detectTags(fs.readdirSync(path.join(p, e.name)));
-        } catch (_) { /* 跳过标签探测 */ }
-      }
-      items.push({ name: e.name, kind: 'dir', tags });
+      // 并行探测所有子目录，避免逐个串行放慢响应。
+      jobs.push(
+        probeDir(p, e.name).then((probe) => items.push({ name: e.name, kind: 'dir', ...probe }))
+      );
     } else {
       items.push({ name: e.name, kind: 'file' });
     }
   }
+  await Promise.all(jobs);
   items.sort((a, b) => {
     if (a.kind !== b.kind) return a.kind === 'dir' ? -1 : 1;
     return a.name.localeCompare(b.name, undefined, { numeric: true });
@@ -238,6 +271,10 @@ const server = http.createServer((req, res) => {
     } catch (err) {
       sendJSON(res, 500, { error: err.message });
     }
+    return;
+  }
+  if (urlPath === '/api/version') {
+    sendJSON(res, 200, { version: APP_VERSION });
     return;
   }
   if (urlPath === '/api/settings') {
@@ -273,12 +310,14 @@ const server = http.createServer((req, res) => {
     const u = new URL(req.url, 'http://localhost');
     const p = u.searchParams.get('path');
     if (!p) { sendJSON(res, 400, { error: 'missing path' }); return; }
-    try {
-      const items = listDir(p);
-      sendJSON(res, 200, { path: p, items });
-    } catch (err) {
-      sendJSON(res, 404, { error: err.code || 'error', message: err.message });
-    }
+    (async () => {
+      try {
+        const items = await listDir(p);
+        sendJSON(res, 200, { path: p, items });
+      } catch (err) {
+        sendJSON(res, 404, { error: err.code || 'error', message: err.message });
+      }
+    })();
     return;
   }
 

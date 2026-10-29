@@ -110,14 +110,19 @@ async function loadChildren(node, silent = false) {
     const items = data.items || [];
     const kids = items.map((it) => {
       const k = makeNode(it.name, it.kind, joinPath(node.path, it.name), node);
-      if (it.kind === 'dir') k.tags = it.tags || []; // 承接后端自动标签
+      if (it.kind === 'dir') {
+        k.tags = it.tags || []; // 承接后端自动标签
+        // 后端已确认该目录无任何子目录 → 叶子（未加载也不显示展开按钮）
+        if (it.hasSubdir === false) k._leaf = true;
+      }
       return k;
     });
     node.children = kids;
     // 缺省不选中：新展开的子目录不继承父节点勾选态，
     // 避免「展开已勾选目录时自动选中其子目录」（子目录需单独勾选）。
     node._loaded = true;
-    node._leaf = node.children.length === 0;   // 加载后无子项 → 底部节点
+    // 底部节点：磁盘上「无任何子目录」（即使有文件）即为叶子 → 渲染时无展开按钮。
+    node._leaf = !node.children.some((c) => c.kind === 'dir');
     setStatus('已加载：' + node.path + '（' + kids.length + ' 项）');
   } catch (err) {
     // 权限不足 / 结点不可读（如 Windows 的 Documents and Settings、$Recycle.Bin 等）：
@@ -184,6 +189,7 @@ function recomputeUp(node) {
 function onCheckChange(node) {
   if (node === state.root) return; // 根始终包含
   const val = node._cb.checked;
+  node._selected = val; // 记录用户勾选态：勾选→清单选中（保持 ✓），取消→false
   propagateDown(node, val);
   recomputeUp(node);
   regenerate();
@@ -306,7 +312,7 @@ function renderNode(node, isRoot = false) {
     loading.className = 'tree-loading';
     loading.textContent = '加载中…';
     wrap.appendChild(loading);
-  } else if (node.kind === 'dir' && node._loaded && !node._collapsed && node.children.length) {
+  } else if (node.kind === 'dir' && node._loaded && !node._collapsed && !node._leaf && node.children.length) {
     const childBox = document.createElement('div');
     childBox.className = 'tree-children';
     node.children.forEach((c) => childBox.appendChild(renderNode(c)));
@@ -593,7 +599,10 @@ async function uploadToRS() {
     }
 
     // 4) 上传主机索引。
-    const hurl = joinUrl(joinUrl(href, base), sanitizeKey(file) + '.json');
+    // 主机索引文件名：rsFile 可能已带 .json（如 LAPTOP-91PR81Q2.json），
+    // 这里保证只补一次后缀，避免生成 LAPTOP-91PR81Q2.json.json。
+    const hostName = (file.endsWith('.json') ? file : file + '.json');
+    const hurl = joinUrl(joinUrl(href, base), sanitizeKey(hostName));
     const hres = await fetch(hurl, { method: 'PUT', headers, body: JSON.stringify(hostIndex, null, 2) });
     if (!hres.ok) throw new Error('HTTP ' + hres.status + ' (host index)');
 
@@ -687,7 +696,9 @@ function recompute(node) {
     if (c.indeterminate) anyIndet = true;
   }
   if (node._selected) {
-    setChecked(node, allChecked && !anyIndet, !(allChecked && !anyIndet));
+    // 明确勾选（用户勾选或清单勾选）的目录保持全选（✓），
+    // 不因子目录部分未勾选而降为半选（横线）。
+    setChecked(node, true, false);
   } else {
     if (allChecked) setChecked(node, true, false);
     else if (anyChecked || anyIndet) setChecked(node, false, true);
@@ -714,7 +725,8 @@ async function applyManifest(manifest) {
       if (liveNode.kind === 'dir' && !liveNode._loaded && liveNode.path) {
         await loadChildren(liveNode, true);
       }
-      if (liveNode.children.length === 0) {
+      // 磁盘上无任何子目录（即使有文件）→ 底部节点
+      if (!liveNode.children.some((c) => c.kind === 'dir')) {
         setChecked(liveNode, true, false);
         liveNode._selected = true;
         liveNode._leaf = true;
@@ -726,13 +738,19 @@ async function applyManifest(manifest) {
     // 是否还包含需要勾选的文件（仅当“包含文件”开启时清单才会有 file 子项）
     const needFiles = dom.optFiles.checked && children.some((c) => c.type === 'file');
 
-    // 下一层既没有目录、也没有可勾选文件 → 整目录选中即可：
-    // 不读磁盘、不下钻，保持折叠，等用户点开时再懒加载。
+    // 下一层既没有目录、也没有可勾选文件 → 整目录选中即可。
+    // 主动校验磁盘一次，确定是否为底部节点：
+    // 磁盘确实无子目录 → _leaf（无展开按钮、整目录勾选、不下钻）；
+    // 磁盘仍有子目录（清单过时）→ 保留展开按钮、缺省折叠，点开时再懒加载。
     if (subDirs.length === 0 && !needFiles) {
-      // 清单里没有下一层子目录，不代表磁盘上没有：保留展开按钮（节点保持未加载、
-      // 缺省不展开，点开时才从磁盘加载）。只有磁盘上确实无子目录才是底部节点（_leaf）。
+      if (liveNode.kind === 'dir' && !liveNode._loaded && liveNode.path) {
+        await loadChildren(liveNode, true);
+        liveNode._collapsed = true;
+      }
       setChecked(liveNode, true, false);
       liveNode._selected = true;
+      // 磁盘上无任何子目录（即使有文件）→ 底部节点，无展开按钮
+      if (!liveNode.children.some((c) => c.kind === 'dir')) liveNode._leaf = true;
       return;
     }
 
@@ -859,3 +877,9 @@ dom.btnLoadRemote.addEventListener('click', loadRemoteJSON);
 // 启动时列出本机磁盘，并回填已保存的 UI 参数
 loadInitial();
 loadSettings();
+
+// 页面顶部显示程序版本号（来自后端 /api/version，便于识别当前运行的代码版本）
+fetch('/api/version')
+  .then((r) => r.json())
+  .then((d) => { const el = document.getElementById('version'); if (el && d.version) el.textContent = 'v' + d.version; })
+  .catch(() => {});
