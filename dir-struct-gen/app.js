@@ -565,7 +565,9 @@ async function uploadToRS() {
     const headers = { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' };
     let uploaded = 0;
     for (const d of manifest.root.children) {
-      if (d.kind !== 'dir') continue;
+      // 注意：这里 d 是 buildManifest 产出的 manifest 节点，字段是 type:'folder'，
+      // 不是内存树节点的 kind:'dir'，之前误判 d.kind 导致所有驱动被跳过、卷文件不上传。
+      if (d.type !== 'folder') continue;
       const vkey = volumeKeyFor(d);
       const fname = sanitizeKey(vkey);
       const incoming = {

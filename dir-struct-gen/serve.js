@@ -116,6 +116,38 @@ function normalizeRoot(root) {
   return root.replace(/[\\/]+$/, '');
 }
 
+// 备选稳定键：当盘根无法写入身份标记文件时（如系统盘 C:\ 根目录对普通用户只读、
+// CD-ROM、某些网络盘），回退使用「卷序列号」作为稳定身份。卷序列号在格式化时分配，
+// 不依赖写盘权限，对真实本地盘稳定可用；取不到时（如云盘不暴露序列号）返回 null，
+// 由上游回退到「主机::盘符」。
+function getVolumeSerial(root) {
+  if (process.platform !== 'win32') return null;
+  const m = /^([A-Za-z]):/.exec(root || '');
+  if (!m) return null;
+  const letter = m[1];
+  const tryParse = (out) => {
+    let mm = out.match(/([0-9A-F]{4}-[0-9A-F]{4})/i); // vol: 1C2D-3E4F
+    if (mm) return mm[1].toUpperCase();
+    mm = out.match(/0x([0-9A-F]{8})/i);              // fsutil: 0x12345678
+    if (mm) {
+      const hex = mm[1].toUpperCase();
+      return hex.slice(0, 4) + '-' + hex.slice(4);
+    }
+    return null;
+  };
+  // 优先 vol（最通用，无需特殊权限）；失败再试 fsutil volumeinfo。
+  try {
+    const out = execFileSync('cmd', ['/c', 'vol', letter + ':'], { windowsHide: true, timeout: 3000 }).toString();
+    const serial = tryParse(out);
+    if (serial) return serial;
+  } catch (_) { /* vol 不可用，尝试 fsutil */ }
+  try {
+    const out = execFileSync('cmd', ['/c', 'fsutil', 'fsinfo', 'volumeinfo', letter + ':\\'], { windowsHide: true, timeout: 3000 }).toString();
+    return tryParse(out);
+  } catch (_) { /* 都取不到 */ }
+  return null;
+}
+
 function ensureVolumeId(root) {
   const r = normalizeRoot(root);
   if (!r) return null;
@@ -137,7 +169,11 @@ function ensureVolumeId(root) {
     } catch (_) { /* 隐藏属性可选，忽略 */ }
     return id;
   } catch (_) {
-    // 3) 读不到也写不了（只读盘 / 无权限，如系统根 /、CD-ROM）→ 回退按主机+盘符
+    // 3) 读不到也写不了（只读盘 / 无权限，如系统根 C:\、CD-ROM）→
+    //    先回退用卷序列号做稳定键（不依赖写盘权限，真实本地盘稳定可用）；
+    //    连序列号都取不到（网络盘/云盘等）→ 再回退 null，上游按「主机::盘符」命名。
+    const serial = getVolumeSerial(r);
+    if (serial) return serial;
     return null;
   }
 }
@@ -351,9 +387,15 @@ server.on('error', (err) => {
   process.exit(1);
 });
 
-server.listen(PORT, () => {
-  console.log('Dir Struct Generator running:');
-  console.log('  http://localhost:' + PORT + '/');
-  console.log('  http://127.0.0.1:' + PORT + '/');
-  console.log('Press Ctrl+C to stop.');
-});
+// 仅当作为主模块直接运行（node serve.js）时才启动 HTTP 服务；
+// 被 require 时（如单元测试）不监听端口，方便复用内部函数。
+if (require.main === module) {
+  server.listen(PORT, () => {
+    console.log('Dir Struct Generator running:');
+    console.log('  http://localhost:' + PORT + '/');
+    console.log('  http://127.0.0.1:' + PORT + '/');
+    console.log('Press Ctrl+C to stop.');
+  });
+}
+
+module.exports = { ensureVolumeId, getVolumeSerial, listDrives, driveObj, normalizeRoot };
