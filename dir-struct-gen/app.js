@@ -114,9 +114,8 @@ async function loadChildren(node, silent = false) {
       return k;
     });
     node.children = kids;
-    // 级联一致：新展开的子项继承父节点的勾选态
-    const inherited = node.checked;
-    kids.forEach((k) => { k.checked = inherited; k.indeterminate = false; });
+    // 缺省不选中：新展开的子目录不继承父节点勾选态，
+    // 避免「展开已勾选目录时自动选中其子目录」（子目录需单独勾选）。
     node._loaded = true;
     node._leaf = node.children.length === 0;   // 加载后无子项 → 底部节点
     setStatus('已加载：' + node.path + '（' + kids.length + ' 项）');
@@ -158,7 +157,14 @@ function setChecked(node, val, indeterminate = false) {
 
 function propagateDown(node, val) {
   setChecked(node, val, false);
-  node.children.forEach((c) => propagateDown(c, val));
+  // 折叠的目录：其子目录当前不可见，只勾当前目录本身，不联动子目录。
+  if (node._collapsed) return;
+  // 展开的目录：联动「当前可见」的所有直接子项（直接子目录/文件）；
+  // 仅当直接子目录自身也未折叠（其子目录可见）时，才继续下钻联动更深的后代。
+  for (const c of node.children) {
+    setChecked(c, val, false);
+    if (c.kind === 'dir' && !c._collapsed) propagateDown(c, val);
+  }
 }
 
 function recomputeUp(node) {
