@@ -191,7 +191,43 @@ function onCheckChange(node) {
   const val = node._cb.checked;
   node._selected = val; // 记录用户勾选态：勾选→清单选中（保持 ✓），取消→false
   propagateDown(node, val);
+  // 取消勾选时，若曾开启「含子目录」，清除递归抓取缓存与标记，避免未选中子树残留/误计入。
+  if (!val && node._includeSubtree) {
+    node._includeSubtree = false;
+    node._subtreeGathered = false;
+    node.children = [];
+    node._loaded = false;
+    node._leaf = false;
+  }
   recomputeUp(node);
+  regenerate();
+}
+
+/* ---------------- 含子目录（递归选择） ---------------- */
+
+// 切换某目录的「含子目录」递归选择：
+// 开 → 勾选该目录并递归向后端抓取其下全部子孙目录（含尚未在 UI 加载的层）纳入清单；
+// 关 → 清除递归抓取缓存，回到「仅勾选本目录」语义。
+async function onIncludeSubtree(node) {
+  if (node === state.root) return; // 根始终包含，不涉及
+  node._includeSubtree = !node._includeSubtree;
+  if (node._includeSubtree) {
+    setChecked(node, true, false);
+    node._selected = true;
+    if (!node._subtreeGathered) {
+      setStatus('正在递归抓取 ' + (node.path || node.name) + ' 下的所有子目录…');
+      await gatherSubtree(node);
+      renderTree();
+    }
+    recomputeUp(node);
+  } else {
+    node._subtreeGathered = false;
+    node.children = [];
+    node._loaded = false;
+    node._leaf = false;
+    recomputeUp(node);
+  }
+  renderTree();
   regenerate();
 }
 
@@ -251,6 +287,19 @@ function renderNode(node, isRoot = false) {
 
   row.append(twisty, cb, name, tag);
 
+  // 「含子目录」递归选择开关（仅目录、非根）：一次性勾选该目录及其下全部子孙目录。
+  if (node.kind === 'dir' && !isRoot) {
+    const subBtn = document.createElement('button');
+    subBtn.type = 'button';
+    subBtn.className = 'subtree-btn' + (node._includeSubtree ? ' active' : '');
+    subBtn.textContent = node._includeSubtree ? '⊖ 含子目录' : '⊕ 含子目录';
+    subBtn.title = node._includeSubtree
+      ? '已递归包含该目录下的所有子目录（含未加载的层）；点击取消'
+      : '递归包含该目录下的所有子目录（含尚未在 UI 加载的层）';
+    subBtn.addEventListener('click', (ev) => { ev.stopPropagation(); onIncludeSubtree(node); });
+    row.appendChild(subBtn);
+  }
+
   // 标签区：自动标签（后端探测）+ 手动标签（用户添加，可移除）+ 添加按钮
   if (node.kind === 'dir') {
     const tagsEl = document.createElement('span');
@@ -262,6 +311,14 @@ function renderNode(node, isRoot = false) {
       d.textContent = '深挖';
       d.title = '该目录被读取侧深挖，已多读一层纳入清单';
       tagsEl.appendChild(d);
+    }
+    // 含子目录（递归选择）徽章
+    if (node._includeSubtree) {
+      const s = document.createElement('span');
+      s.className = 'tag-badge subtree';
+      s.textContent = '含子目录';
+      s.title = '该目录已递归包含其下全部子目录（含尚未在 UI 加载的层）';
+      tagsEl.appendChild(s);
     }
     const merged = [...new Set([...(node.tags || []), ...(node.manualTags || [])])];
     for (const t of merged) {
@@ -329,13 +386,61 @@ function renderNode(node, isRoot = false) {
 
 /* ---------------- 生成清单 ---------------- */
 
-function buildManifest(node, includeFiles) {
+// 递归抓取某目录下所有后代目录（含尚未在 UI 中加载的层），返回清单 children 数组，
+// 并就地填充 node.children（全部 checked、_loaded、_collapsed），便于用户在树中展开核验。
+// 用于「含子目录」递归选择：勾选某目录即把其下全部子目录（含未加载的孙目录）纳入清单。
+// visited 防止符号链接 / junctions 造成的循环递归。
+async function gatherSubtree(node, visited) {
+  visited = visited || new Set();
+  if (!node.path || visited.has(node.path)) return [];
+  visited.add(node.path);
+  let data;
+  try {
+    const res = await fetch('/api/list?path=' + encodeURIComponent(node.path));
+    if (!res.ok) return [];
+    data = await res.json();
+  } catch (_) { return []; }
+  const items = (data && data.items) || [];
+  const manifestChildren = [];
+  const liveChildren = [];
+  for (const it of items) {
+    if (it.kind !== 'dir') continue;
+    const child = makeNode(it.name, 'dir', joinPath(node.path, it.name), node);
+    child.tags = it.tags || [];
+    child.checked = true;
+    child._selected = true;
+    child._loaded = true;
+    child._collapsed = true;
+    child._leaf = (it.hasSubdir === false);
+    const sub = child._leaf ? [] : await gatherSubtree(child, visited);
+    const f = { name: child.name, type: 'folder', children: sub };
+    if (child.tags.length) f.tags = child.tags;
+    if (child._leaf) f.leaf = true;
+    manifestChildren.push(f);
+    liveChildren.push(child);
+  }
+  node.children = liveChildren;
+  node._loaded = true;
+  node._collapsed = true;
+  node._leaf = !liveChildren.some((c) => c.kind === 'dir');
+  node._subtreeGathered = true;
+  return manifestChildren;
+}
+
+// 把内存树节点转成清单 folder 对象。异步：遇到标记「含子目录」(_includeSubtree) 且尚未抓取的节点，
+// 先递归向后端抓取完整子树（含未加载的层），再继续下钻。
+async function buildManifestAsync(node, includeFiles) {
   const children = [];
   for (const c of node.children) {
     if (c.kind === 'dir') {
       // 勾选(checked)或半选(indeterminate，即部分子项被选中)都需纳入并继续下钻，
       // 否则上层「半选」的目录会把已勾选的子目录甩出清单。
-      if (c.checked || c.indeterminate) children.push(buildManifest(c, includeFiles));
+      if (c.checked || c.indeterminate) {
+        // 「含子目录」：递归抓取该目录下的完整子树（含尚未在 UI 加载的层）；
+        // 已抓取过(_subtreeGathered)则直接复用缓存，避免每次刷新重复请求。
+        if (c._includeSubtree && !c._subtreeGathered) await gatherSubtree(c);
+        children.push(await buildManifestAsync(c, includeFiles));
+      }
     } else if (includeFiles && c.checked) {
       children.push({ name: c.name, type: 'file' });
     }
@@ -353,9 +458,9 @@ function buildManifest(node, includeFiles) {
   return out;
 }
 
-function generateManifest(genAt) {
+async function generateManifest(genAt) {
   const includeFiles = dom.optFiles.checked;
-  const rootManifest = buildManifest(state.root, includeFiles);
+  const rootManifest = await buildManifestAsync(state.root, includeFiles);
   return {
     version: 1,
     generatedAt: genAt || new Date().toISOString(),
@@ -365,9 +470,9 @@ function generateManifest(genAt) {
   };
 }
 
-function regenerate(genAt) {
+async function regenerate(genAt) {
   if (!state.root) return;
-  const manifest = generateManifest(genAt);
+  const manifest = await generateManifest(genAt);
   dom.preview.value = JSON.stringify(manifest, null, 2);
   updateCount();
 }
@@ -546,7 +651,7 @@ async function uploadToRS() {
     renderTree();   // 刷新，让深挖目录的特殊标识显示出来
     regenerate();
 
-    const manifest = generateManifest();
+    const manifest = await generateManifest();
 
     // 2) 主机索引：只记录「本机挂了哪些盘、挂在哪个盘符、稳定身份是什么」。
     const mounts = manifest.root.children.map((d) => {
@@ -678,7 +783,18 @@ async function loadSettings() {
 // 清空当前勾选（保留根），便于从加载的清单重新选。
 function clearSelection() {
   forEachNode(state.root, (n) => {
-    if (n !== state.root) { setChecked(n, false, false); n._selected = false; }
+    if (n !== state.root) {
+      setChecked(n, false, false);
+      n._selected = false;
+      // 清除「含子目录」递归抓取缓存与标记，回到干净状态。
+      if (n._includeSubtree) {
+        n._includeSubtree = false;
+        n._subtreeGathered = false;
+        n.children = [];
+        n._loaded = false;
+        n._leaf = false;
+      }
+    }
   });
 }
 

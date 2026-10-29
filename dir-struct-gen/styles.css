@@ -148,6 +148,22 @@ body {
   cursor: pointer;
 }
 .tag-add:hover { border-color: var(--accent); color: var(--accent); }
+
+/* 含子目录（递归选择）开关按钮 */
+.subtree-btn {
+  font-size: 10.5px;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 999px;
+  border: 1px dashed var(--border);
+  background: transparent;
+  color: var(--text-soft);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.subtree-btn:hover { border-color: var(--accent); color: var(--accent); }
+.subtree-btn.active { border-style: solid; background: #e7f6ec; color: #1a8a4a; border-color: #a6dab9; font-weight: 600; }
+.tag-badge.subtree { background: #e7f6ec; color: #1a8a4a; border: 1px solid #a6dab9; font-weight: 600; }
 .tree-children { margin-left: 18px; border-left: 1px dashed var(--border); padding-left: 4px; }
 .tree-children.collapsed { display: none; }
 .tree-loading { padding: 2px 6px 2px 22px; font-size: 12px; color: var(--text-soft); font-style: italic; }

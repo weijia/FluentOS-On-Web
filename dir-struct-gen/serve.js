@@ -23,7 +23,7 @@ const ROOT = __dirname;
 const PORT = 8000;
 
 // 程序版本号：用于页面上方展示，方便识别当前运行的是哪一版代码。
-const APP_VERSION = '1.6.0';
+const APP_VERSION = '1.7.0';
 
 // 持久化的 UI 参数（RemoteStorage 等）存放目录。
 // 默认放在本应用目录下 app_data/folders/，文件名即主机名；如需改用真实 /app_data 绝对路径，改这里即可。
