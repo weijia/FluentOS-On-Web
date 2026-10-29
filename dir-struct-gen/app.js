@@ -45,6 +45,7 @@ function makeNode(name, kind, fsPath, parent = null) {
     name, kind, path: fsPath, parent,
     checked: false, indeterminate: false, children: [],
     _loaded: false, _collapsed: false, _loading: false,
+    _leaf: false,   // 底部节点标记：仅当磁盘上确实无子目录（加载后 children 为空）时置 true，渲染时无展开按钮
     tags: [],        // 自动标签（来自后端 /api/list 探测）
     manualTags: [],  // 用户手动打的标签
   };
@@ -117,6 +118,7 @@ async function loadChildren(node, silent = false) {
     const inherited = node.checked;
     kids.forEach((k) => { k.checked = inherited; k.indeterminate = false; });
     node._loaded = true;
+    node._leaf = node.children.length === 0;   // 加载后无子项 → 底部节点
     setStatus('已加载：' + node.path + '（' + kids.length + ' 项）');
   } catch (err) {
     // 权限不足 / 结点不可读（如 Windows 的 Documents and Settings、$Recycle.Bin 等）：
@@ -208,6 +210,7 @@ function renderNode(node, isRoot = false) {
   twisty.className = 'twisty';
   if (node.kind === 'dir') {
     if (node._error) twisty.textContent = '';                             // 读取失败 → 不可展开
+    else if (node._leaf) twisty.textContent = '';                         // 底部节点 → 无展开按钮
     else if (!node._loaded) twisty.textContent = '▸';                      // 未加载 → 点开展开
     else if (node.children.length) twisty.textContent = node._collapsed ? '▸' : '▾';
     else twisty.textContent = '';                                         // 空目录 → 无箭头
@@ -240,6 +243,14 @@ function renderNode(node, isRoot = false) {
   if (node.kind === 'dir') {
     const tagsEl = document.createElement('span');
     tagsEl.className = 'tags';
+    // 深挖标记：该目录被读取侧深挖，已多读一层纳入清单
+    if (node._deepened) {
+      const d = document.createElement('span');
+      d.className = 'tag-badge deepened';
+      d.textContent = '深挖';
+      d.title = '该目录被读取侧深挖，已多读一层纳入清单';
+      tagsEl.appendChild(d);
+    }
     const merged = [...new Set([...(node.tags || []), ...(node.manualTags || [])])];
     for (const t of merged) {
       const isManual = (node.manualTags || []).includes(t);
@@ -323,6 +334,9 @@ function buildManifest(node, includeFiles) {
   // 驱动层节点带稳定 volumeId（来自磁盘根 .dir-struct-id），供读取侧去重 / 命名深挖标记；
   // 子目录不重复携带，靠祖先驱动节点溯源即可。
   if (node.volumeId) out.volumeId = node.volumeId;
+  // 底部节点标记：仅当磁盘上确实无子目录（加载后 children 为空）时写入。
+  // 读取侧据此把该目录直接当底部节点，省去一次磁盘 /api/list 请求。
+  if (node._leaf) out.leaf = true;
   if (merged.length) out.tags = merged;
   return out;
 }
@@ -411,9 +425,10 @@ function volumeKeyFor(drive) {
 async function loadDeepenMarks(key) {
   const href = dom.rsHref.value.trim();
   const token = dom.rsToken.value.trim();
-  const base = dom.rsBase.value.trim() || '/';
   if (!href || !token) return [];
-  const url = joinUrl(joinUrl(href, base), 'folder-deepen/' + sanitizeKey(key) + '.json');
+  // folder-deepen 是独立 category，固定位于 <user>/app_data/folder-deepen/，
+  // 不能拼 rsBase（清单所在 /app_data/folders/），否则会 404。
+  const url = joinUrl(href, 'app_data/folder-deepen/' + sanitizeKey(key) + '.json');
   try {
     const res = await fetch(url, { headers: { 'Authorization': 'Bearer ' + token } });
     if (!res.ok) return [];
@@ -427,9 +442,8 @@ async function loadDeepenMarks(key) {
 async function clearDeepenMarks(key) {
   const href = dom.rsHref.value.trim();
   const token = dom.rsToken.value.trim();
-  const base = dom.rsBase.value.trim() || '/';
   if (!href || !token) return;
-  const url = joinUrl(joinUrl(href, base), 'folder-deepen/' + sanitizeKey(key) + '.json');
+  const url = joinUrl(href, 'app_data/folder-deepen/' + sanitizeKey(key) + '.json');
   try {
     await fetch(url, {
       method: 'PUT',
@@ -457,11 +471,12 @@ async function ensureDeepened(drive, segs) {
     cur = child;
   }
   if (!cur._loaded) await loadChildren(cur, true); // 多读一层
+  cur._deepened = true; // 标记为深挖目录，树中特殊显示
   return true;
 }
 
 // 应用全部深挖标记：读取 → 逐块盘深挖 → 消耗标记。返回统计。
-async function applyDeepenMarks() {
+async function applyDeepenMarks(clear = true) {
   let total = 0;
   const warns = [];
   for (const drive of state.root.children) {
@@ -485,7 +500,8 @@ async function applyDeepenMarks() {
       pending = remain;
     }
     total += marks.length;
-    await clearDeepenMarks(key);
+    // 上传时消费标记（清空）；从 RS 加载时保留标记，供后续继续消费。
+    if (clear) await clearDeepenMarks(key);
   }
   return { total, warns };
 }
@@ -515,6 +531,7 @@ async function uploadToRS() {
   try {
     // 1) 应用深挖标记（按需多读磁盘层），并刷新预览。
     const { total, warns } = await applyDeepenMarks();
+    renderTree();   // 刷新，让深挖目录的特殊标识显示出来
     regenerate();
 
     const manifest = generateManifest();
@@ -683,15 +700,46 @@ async function applyManifest(manifest) {
   setStatus('正在按清单展开目录…');
 
   async function applyNode(mNode, liveNode) {
-    // 加载该层（加载前先取消勾选，避免子项被继承勾选）；静默展开，最后统一刷新预览。
+    const children = mNode.children || [];
+    // 清单标记 leaf：混合策略——先回退校验磁盘一次。
+    // 磁盘确实无子目录才按底部节点处理（无展开按钮、勾选整目录、不下钻）；
+    // 若磁盘已有子目录（清单过时），落到下方常规逻辑，保留展开按钮、缺省不展开。
+    if (mNode.leaf === true) {
+      if (liveNode.kind === 'dir' && !liveNode._loaded && liveNode.path) {
+        await loadChildren(liveNode, true);
+      }
+      if (liveNode.children.length === 0) {
+        setChecked(liveNode, true, false);
+        liveNode._selected = true;
+        liveNode._leaf = true;
+        return;
+      }
+    }
+    // 下一层需要还原的子目录
+    const subDirs = children.filter((c) => c.type === 'folder' || c.type === undefined);
+    // 是否还包含需要勾选的文件（仅当“包含文件”开启时清单才会有 file 子项）
+    const needFiles = dom.optFiles.checked && children.some((c) => c.type === 'file');
+
+    // 下一层既没有目录、也没有可勾选文件 → 整目录选中即可：
+    // 不读磁盘、不下钻，保持折叠，等用户点开时再懒加载。
+    if (subDirs.length === 0 && !needFiles) {
+      // 清单里没有下一层子目录，不代表磁盘上没有：保留展开按钮（节点保持未加载、
+      // 缺省不展开，点开时才从磁盘加载）。只有磁盘上确实无子目录才是底部节点（_leaf）。
+      setChecked(liveNode, true, false);
+      liveNode._selected = true;
+      return;
+    }
+
+    // 有需要还原的子目录（或文件）才加载本层。
+    // 加载前先取消勾选，避免子项被继承勾选；静默展开，最后统一刷新预览。
+    liveNode._selected = true;
     if (liveNode.kind === 'dir' && !liveNode._loaded && liveNode.path) {
       const prev = liveNode.checked;
       liveNode.checked = false;
       await loadChildren(liveNode, true);
       liveNode.checked = prev;
     }
-    liveNode._selected = true;
-    for (const mChild of (mNode.children || [])) {
+    for (const mChild of children) {
       const isFolder = mChild.type === 'folder' || mChild.type === undefined;
       if (isFolder) {
         const child = liveNode.children.find((c) => c.kind === 'dir' && c.name === mChild.name);
@@ -743,6 +791,17 @@ async function loadRemoteJSON() {
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const manifest = await res.json();
     await applyManifest(manifest);
+    // 加载后：按 folder_deepen 里列的目录下钻展示（保留标记，不清空），
+    // 使这些深挖目录也在树中出现并带上「深挖」徽章。
+    const deepen = await applyDeepenMarks(false);
+    renderTree();
+    regenerate(manifest.generatedAt);
+    console.log('[dir-struct] folder_deepen 结果:', deepen);
+    let extra = deepen.total
+      ? '；已按 folder_deepen 下钻 ' + deepen.total + ' 个目录（标记保留）'
+      : '；folder_deepen 未读到任何可下钻目录';
+    if (deepen.warns.length) extra += '；未匹配路径：' + deepen.warns.slice(0, 6).join('、');
+    setStatus('已根据清单展开并勾选目录（未匹配到的盘符/路径已跳过）。' + extra, false);
   } catch (err) {
     setStatus('从 RemoteStorage 加载失败：' + err.message, true);
   }

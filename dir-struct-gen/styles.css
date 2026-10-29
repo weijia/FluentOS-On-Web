@@ -134,6 +134,7 @@ body {
 }
 .tag-badge.auto { background: #eef1f6; color: #51607a; border: 1px solid #d9dee7; }
 .tag-badge.manual { background: #fff0d6; color: #9a6b16; border: 1px solid #f0d9a3; }
+.tag-badge.deepened { background: #e6effb; color: #0a78d6; border: 1px solid #a8cdf0; font-weight: 600; }
 .tag-x { cursor: pointer; font-weight: 700; opacity: .7; }
 .tag-x:hover { opacity: 1; }
 .tag-add {

@@ -102,7 +102,15 @@ function detectTags(names) {
 const VOLUME_MARKER = '.dir-struct-id';
 
 function normalizeRoot(root) {
-  return (root || '').replace(/[\\/]+$/, '');
+  if (!root) return root;
+  // Windows 盘符根（C: / C:\ / c:）必须保留尾部反斜杠：
+  // 在 Windows 里 `C:` 表示该盘的「当前工作目录」，`C:\` 才是根目录。
+  // 若去掉尾斜杠，fs.readdirSync("C:") 会读到盘符当前目录而非根目录。
+  if (/^[A-Za-z]:[\\/]?$/i.test(root)) return root.charAt(0).toUpperCase() + ':\\';
+  // POSIX 根 `/` 也不能去掉尾部斜杠。
+  if (root === '/') return '/';
+  // 其余路径：去掉末尾的斜杠/反斜杠，避免后续 path.join 拼接时重复。
+  return root.replace(/[\\/]+$/, '');
 }
 
 function ensureVolumeId(root) {
