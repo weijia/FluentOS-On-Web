@@ -300,11 +300,13 @@ function renderNode(node, isRoot = false) {
   name.className = 'name';
   name.textContent = node.name + (isRoot ? '  (根)' : '');
 
-  // 目录大小徽标：展示该目录（含子孙）的文件数与总大小（来自「汇总文件数与大小」）。
+  // 目录大小徽标：仅当该目录「已加入索引」（被勾选 checked 或半选 indeterminate，
+  // 即会出现在生成的清单里）时才展示其（含子孙）的文件数与总大小。未选中的目录不取大小、不显示，
+  // 避免把已取消勾选的目录误显示成「有大小」。
   const sizeInfo = document.createElement('span');
   sizeInfo.className = 'size-info';
   let hasSize = false;
-  if (node.kind === 'dir' && node._summary) {
+  if (node.kind === 'dir' && (node.checked || node.indeterminate) && node._summary) {
     sizeInfo.textContent = formatCount(node._summary.fileCount) + ' 项 · ' + formatSize(node._summary.totalSize);
     sizeInfo.title = '文件数 ' + node._summary.fileCount + ' · 总大小 ' + node._summary.totalSize + ' 字节';
     hasSize = true;
@@ -518,6 +520,16 @@ async function buildManifestAsync(node, includeFiles, ctx) {
   return out;
 }
 
+// 清空所有树节点上缓存的目录大小（_summary）。每次重新生成清单前调用：
+// 仅「当前在索引里」的目录会在 buildManifestAsync 遍历时重新挂上 _summary，
+// 被取消勾选（或祖先被取消）的目录因不再被遍历而不会重新获得 _summary，从而
+// 保证树形视图里只有「已加入索引」的目录才显示大小，避免残留旧大小。
+function clearSummaries(node) {
+  if (!node) return;
+  delete node._summary;
+  for (const c of (node.children || [])) clearSummaries(c);
+}
+
 // 收集「需要扫描文件大小」的最小独立目录根：遍历整棵选择树，找出所有
 // checked / indeterminate 的目录节点，但**排除那些祖先（不含自身、不含虚拟根「此电脑」）
 // 已经 checked 的节点**——因为它们已被父目录整段覆盖，无需自成一根。
@@ -575,6 +587,9 @@ async function generateManifest(genAt) {
   // 仅当开启了「汇总文件数与大小」时，才去后端拿文件数与总大小。
   // 关键优化：只把「被选中的目录」作为扫描根传给 /api/summary，后端只递归统计这些子树，
   // 绝不扫描整块盘。通过 fetchDriveSummary 走内存缓存（按目录路径，TTL 2 分钟）。
+  // 先清空旧的大小缓存：仅「当前在索引里」的目录会在下方遍历时重新挂上 _summary，
+  // 取消勾选（或祖先被取消）的目录不再被遍历，从而树里只显示已加入索引目录的大小。
+  if (state.root) clearSummaries(state.root);
   if (includeSizes && state.root) {
     const roots = collectSummaryRoots(state.root); // 最小独立扫描根（排除被祖先选中的）
     for (const r of roots) {
