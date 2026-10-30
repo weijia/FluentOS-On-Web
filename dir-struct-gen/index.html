@@ -19,11 +19,12 @@
 
   <section class="options">
     <label class="opt"><input type="checkbox" id="opt-files" /> 包含文件（仅占位，不读内容）</label>
+    <label class="opt"><input type="checkbox" id="opt-size" checked /> 汇总文件数与大小</label>
     <span id="status" class="status">未选择文件夹</span>
   </section>
 
   <main class="layout">
-    <section class="pane tree-pane">
+    <section class="pane tree-pane" id="tree-pane">
       <div class="pane-toolbar">
         <button id="btn-select-all" class="btn btn-sm">全选</button>
         <button id="btn-deselect-all" class="btn btn-sm">全不选</button>
@@ -37,18 +38,20 @@
       </div>
     </section>
 
+    <div class="splitter" id="splitter" title="拖动调整左右宽度"></div>
+
     <section class="pane preview-pane">
       <div class="pane-toolbar">
-        <strong>清单预览 (JSON)</strong>
+        <strong>清单预览 (v2 拆分 · 主机索引 + 卷文件)</strong>
         <span class="spacer"></span>
         <button id="btn-load-local" class="btn btn-sm">加载本地 JSON</button>
         <input id="input-load-file" type="file" accept="application/json,.json" hidden />
         <button id="btn-load-remote" class="btn btn-sm">从 RS 加载</button>
         <button id="btn-regen" class="btn btn-sm">重新生成</button>
-        <button id="btn-copy" class="btn btn-sm">复制</button>
-        <button id="btn-download" class="btn btn-sm btn-primary">下载 JSON</button>
+        <button id="btn-copy" class="btn btn-sm">复制全部</button>
+        <button id="btn-download" class="btn btn-sm btn-primary">下载 ZIP</button>
       </div>
-      <textarea id="preview" class="preview" readonly placeholder="生成后在此预览清单 JSON…"></textarea>
+      <div id="preview" class="preview-multi"></div>
     </section>
   </main>
 

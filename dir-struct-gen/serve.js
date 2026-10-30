@@ -20,10 +20,10 @@ const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 
 const ROOT = __dirname;
-const PORT = 8000;
+const PORT = process.env.DSG_PORT ? Number(process.env.DSG_PORT) : 8000;
 
 // 程序版本号：用于页面上方展示，方便识别当前运行的是哪一版代码。
-const APP_VERSION = '1.7.0';
+const APP_VERSION = '1.8.0';
 
 // 持久化的 UI 参数（RemoteStorage 等）存放目录。
 // 默认放在本应用目录下 app_data/folders/，文件名即主机名；如需改用真实 /app_data 绝对路径，改这里即可。
@@ -256,7 +256,7 @@ async function probeDir(p, name) {
   return { tags, hasSubdir };
 }
 
-async function listDir(p) {
+async function listDir(p, withSizes) {
   let dirents;
   try {
     dirents = await withTimeout(fs.promises.readdir(p, { withFileTypes: true }), 4000);
@@ -265,6 +265,7 @@ async function listDir(p) {
   }
   const items = [];
   const jobs = [];
+  const fileEntries = [];
   for (const e of dirents) {
     // 过滤掉磁盘身份标记文件，避免它污染目录树 / 清单。
     if (e.name === VOLUME_MARKER) continue;
@@ -283,8 +284,18 @@ async function listDir(p) {
         probeDir(p, e.name).then((probe) => items.push({ name: e.name, kind: 'dir', ...probe }))
       );
     } else {
-      items.push({ name: e.name, kind: 'file' });
+      // 文件项：默认只给文件名；仅当 withSizes 为真（前端「包含文件 + 汇总」同时开启）
+      // 才逐个 stat 取字节数，避免拖慢日常浏览。某些 Node 版本的 Dirent 不带 size，故用 stat 兜底。
+      const it = { name: e.name, kind: 'file' };
+      items.push(it);
+      fileEntries.push(it);
     }
+  }
+  if (withSizes) {
+    await Promise.all(fileEntries.map(async (it) => {
+      try { it.size = (await fs.promises.stat(path.join(p, it.name))).size || 0; }
+      catch (_) { it.size = 0; }
+    }));
   }
   await Promise.all(jobs);
   items.sort((a, b) => {
@@ -292,6 +303,57 @@ async function listDir(p) {
     return a.name.localeCompare(b.name, undefined, { numeric: true });
   });
   return items;
+}
+
+// 递归统计某目录下「全部文件（含子孙）」的数量与总大小（字节）。
+// 一次性遍历整棵子树，把所有目录的绝对路径 → {fileCount, totalSize} 写进 acc，
+// 前端只需对每块盘根调用一次，即可拿到其下每个目录的汇总，避免按选中目录逐个重复扫描。
+// 循环防护：用真实路径集合防止符号链接 / junction 造成的死循环；depth 上限兜底。
+async function summarizeTree(p, visited, depth, acc) {
+  if (depth > 200) return { fileCount: 0, totalSize: 0 };
+  let rp;
+  try { rp = await fs.promises.realpath(p); } catch (_) { rp = p; }
+  if (visited.has(rp)) return { fileCount: 0, totalSize: 0 };
+  visited.add(rp);
+  let dirents;
+  try {
+    dirents = await withTimeout(fs.promises.readdir(p, { withFileTypes: true }), 4000);
+  } catch (_) {
+    visited.delete(rp);
+    return { fileCount: 0, totalSize: 0 };
+  }
+  let fileCount = 0, totalSize = 0;
+  const dirJobs = [];
+  const fileSizeJobs = [];
+  for (const e of dirents) {
+    if (e.name === VOLUME_MARKER) continue; // 跳过磁盘身份标记文件
+    if (e.isDirectory()) {
+      dirJobs.push(summarizeTree(path.join(p, e.name), visited, depth + 1, acc));
+    } else if (e.isSymbolicLink()) {
+      // 符号链接：先判定是否指向目录，再决定是否下钻（避免对文件链接误判）。
+      dirJobs.push((async () => {
+        try {
+          if ((await fs.promises.stat(path.join(p, e.name))).isDirectory()) {
+            return summarizeTree(path.join(p, e.name), visited, depth + 1, acc);
+          }
+        } catch (_) { /* 不可达，按 0 处理 */ }
+        return { fileCount: 0, totalSize: 0 };
+      })());
+    } else {
+      fileCount += 1;
+      if (typeof e.size === 'number') totalSize += e.size;
+      else fileSizeJobs.push((async () => {
+        try { return (await fs.promises.stat(path.join(p, e.name))).size || 0; } catch (_) { return 0; }
+      })());
+    }
+  }
+  const [subs, extraSizes] = await Promise.all([Promise.all(dirJobs), Promise.all(fileSizeJobs)]);
+  for (const s of subs) { fileCount += s.fileCount; totalSize += s.totalSize; }
+  for (const s of extraSizes) totalSize += s;
+  // 记录「当前目录」自身的递归汇总（含直接文件 + 全部后代）。
+  if (acc && p) acc.set(p, { fileCount, totalSize });
+  visited.delete(rp);
+  return { fileCount, totalSize };
 }
 
 /* ---------------- request router ---------------- */
@@ -346,10 +408,34 @@ const server = http.createServer((req, res) => {
     const u = new URL(req.url, 'http://localhost');
     const p = u.searchParams.get('path');
     if (!p) { sendJSON(res, 400, { error: 'missing path' }); return; }
+    // sizes=1 时（前端「包含文件 + 汇总」同时开启）才对每个文件 stat 取字节数。
+    const withSizes = u.searchParams.get('sizes') === '1';
     (async () => {
       try {
-        const items = await listDir(p);
+        const items = await listDir(p, withSizes);
         sendJSON(res, 200, { path: p, items });
+      } catch (err) {
+        sendJSON(res, 404, { error: err.code || 'error', message: err.message });
+      }
+    })();
+    return;
+  }
+  if (urlPath === '/api/summary') {
+    const u = new URL(req.url, 'http://localhost');
+    // 支持多 path（?path=A&path=B&path=C）：前端只把「被选中的目录」作为扫描根传入，
+    // 后端分别递归统计各自子树后合并，绝不扫描未选中的目录/整盘。
+    const paths = u.searchParams.getAll('path').filter(Boolean);
+    if (!paths.length) { sendJSON(res, 400, { error: 'missing path' }); return; }
+    (async () => {
+      try {
+        const acc = new Map();
+        for (const p of paths) {
+          try { await summarizeTree(p, new Set(), 0, acc); }
+          catch (_) { /* 单个根扫描失败不影响其他根 */ }
+        }
+        const summaries = {};
+        for (const [k, v] of acc) summaries[k] = v;
+        sendJSON(res, 200, { roots: paths, summaries });
       } catch (err) {
         sendJSON(res, 404, { error: err.code || 'error', message: err.message });
       }

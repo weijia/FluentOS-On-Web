@@ -69,14 +69,26 @@ body {
 
 .layout {
   flex: 1;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 14px;
+  display: flex;
+  gap: 0;
   padding: 14px 20px;
   min-height: 0;
 }
+.tree-pane { flex: 0 0 46%; min-width: 180px; }
+.preview-pane { flex: 1 1 0; min-width: 260px; }
+.splitter {
+  flex: 0 0 6px;
+  margin: 0 8px;
+  cursor: col-resize;
+  background: var(--border);
+  border-radius: 3px;
+  transition: background 0.15s;
+}
+.splitter:hover, .splitter:active { background: var(--accent); }
 @media (max-width: 880px) {
-  .layout { grid-template-columns: 1fr; }
+  .layout { flex-direction: column; }
+  .tree-pane, .preview-pane { flex: 1 1 0 !important; min-width: 0; }
+  .splitter { display: none; }
 }
 
 .pane {
@@ -118,6 +130,10 @@ body {
   font-size: 11px;
 }
 .tree-row .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tree-row .size-info {
+  flex: 0 0 auto; font-size: 11px; color: var(--accent); background: var(--accent-soft);
+  padding: 1px 7px; border-radius: 10px; white-space: nowrap; font-variant-numeric: tabular-nums;
+}
 .tree-row .tag { font-size: 11px; color: var(--text-soft); }
 
 /* 标签徽章 */
@@ -183,6 +199,30 @@ input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px;
   color: var(--text);
   background: #fbfcfe;
 }
+
+/* 多卡片预览：每个上传文件（主机索引 / 卷文件）单独一个窗口，与 RS 上存储内容一致 */
+.preview-multi {
+  flex: 1;
+  overflow: auto;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: #fbfcfe;
+}
+.preview-card { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; display: flex; flex-direction: column; }
+.preview-card.host-card { border-color: var(--accent); }
+.preview-card-head { display: flex; align-items: center; gap: 8px; padding: 7px 10px; background: #eef1f6; border-bottom: 1px solid var(--border); }
+.preview-card.host-card .preview-card-head { background: var(--accent-soft); }
+.preview-card-title { font-size: 12.5px; font-weight: 600; color: var(--text); }
+.preview-card-head .spacer { flex: 1; }
+.preview-card-body {
+  border: none; resize: vertical; padding: 10px 12px; min-height: 120px; height: 340px;
+  font-family: "Cascadia Code", Consolas, monospace; font-size: 12.5px; line-height: 1.5;
+  outline: none; color: var(--text); background: #fbfcfe; width: 100%; overflow: auto;
+}
+/* 默认：固定可拖拽高度 + 滚动；用户可拖动文本框右下角自由改变窗口大小，避免大文件看不清 */
+.preview-card.expanded .preview-card-body { height: 78vh; }
 
 .rs-panel {
   margin: 0 20px 16px;

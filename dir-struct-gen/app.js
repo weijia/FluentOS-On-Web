@@ -11,10 +11,12 @@ const $ = (id) => document.getElementById(id);
 const state = {
   root: null,       // 此电脑 虚拟根节点（始终存在）
   computerId: null, // 本机 ID（主机名），用于清单根与 RS 文件名默认值
+  previewFiles: [], // 当前预览的 v2 拆分文件列表 [{name, content, isHost}]，与上传到 RS 的内容一致
 };
 
 const dom = {
   optFiles: $('opt-files'),
+  optSize: $('opt-size'),
   status: $('status'),
   tree: $('tree'),
   count: $('count'),
@@ -62,6 +64,22 @@ function joinPath(base, name) {
   return /[\\/]$/.test(base) ? base + name : base + '\\' + name;
 }
 
+// 人类可读的文件大小：字节 → B/KB/MB/GB（1024 进制，保留两位小数）。
+function formatSize(bytes) {
+  if (typeof bytes !== 'number' || bytes < 0) return '—';
+  if (bytes < 1024) return bytes + ' B';
+  const units = ['KB', 'MB', 'GB', 'TB', 'PB'];
+  let v = bytes / 1024, i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return v.toFixed(v >= 100 || v % 1 === 0 ? 0 : 1) + ' ' + units[i];
+}
+
+// 千分位文件数：1234 → "1,234"。
+function formatCount(n) {
+  if (typeof n !== 'number' || n < 0) return '—';
+  return n.toLocaleString('en-US');
+}
+
 /* ---------------- 初始加载：列出本机磁盘 ---------------- */
 
 async function loadInitial() {
@@ -101,7 +119,11 @@ async function loadChildren(node, silent = false) {
   node._loading = true;
   renderTree(); // 显示「加载中…」
   try {
-    const res = await fetch('/api/list?path=' + encodeURIComponent(node.path));
+    // 仅当「包含文件 + 汇总文件大小」同时开启时，请求时带 sizes=1，
+    // 让后端对每个文件 stat 取字节数（用于清单里单个文件的 size 字段），避免拖慢日常浏览。
+    const needSizes = dom.optFiles.checked && dom.optSize.checked;
+    const qs = '/api/list?path=' + encodeURIComponent(node.path) + (needSizes ? '&sizes=1' : '');
+    const res = await fetch(qs);
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.message || ('HTTP ' + res.status));
@@ -110,7 +132,10 @@ async function loadChildren(node, silent = false) {
     const items = data.items || [];
     const kids = items.map((it) => {
       const k = makeNode(it.name, it.kind, joinPath(node.path, it.name), node);
-      if (it.kind === 'dir') {
+      if (it.kind === 'file') {
+        // 承接后端 /api/list 返回的文件大小（字节），供「包含文件」时写入清单。
+        if (typeof it.size === 'number') k.size = it.size;
+      } else {
         k.tags = it.tags || []; // 承接后端自动标签
         // 后端已确认该目录无任何子目录 → 叶子（未加载也不显示展开按钮）
         if (it.hasSubdir === false) k._leaf = true;
@@ -275,6 +300,16 @@ function renderNode(node, isRoot = false) {
   name.className = 'name';
   name.textContent = node.name + (isRoot ? '  (根)' : '');
 
+  // 目录大小徽标：展示该目录（含子孙）的文件数与总大小（来自「汇总文件数与大小」）。
+  const sizeInfo = document.createElement('span');
+  sizeInfo.className = 'size-info';
+  let hasSize = false;
+  if (node.kind === 'dir' && node._summary) {
+    sizeInfo.textContent = formatCount(node._summary.fileCount) + ' 项 · ' + formatSize(node._summary.totalSize);
+    sizeInfo.title = '文件数 ' + node._summary.fileCount + ' · 总大小 ' + node._summary.totalSize + ' 字节';
+    hasSize = true;
+  }
+
   const tag = document.createElement('span');
   tag.className = 'tag';
   if (node.kind === 'dir') {
@@ -285,7 +320,8 @@ function renderNode(node, isRoot = false) {
     tag.textContent = '📄';
   }
 
-  row.append(twisty, cb, name, tag);
+  if (hasSize) row.append(twisty, cb, name, sizeInfo, tag);
+  else row.append(twisty, cb, name, tag);
 
   // 「含子目录」递归选择开关（仅目录、非根）：一次性勾选该目录及其下全部子孙目录。
   if (node.kind === 'dir' && !isRoot) {
@@ -429,7 +465,7 @@ async function gatherSubtree(node, visited) {
 
 // 把内存树节点转成清单 folder 对象。异步：遇到标记「含子目录」(_includeSubtree) 且尚未抓取的节点，
 // 先递归向后端抓取完整子树（含未加载的层），再继续下钻。
-async function buildManifestAsync(node, includeFiles) {
+async function buildManifestAsync(node, includeFiles, ctx) {
   const children = [];
   for (const c of node.children) {
     if (c.kind === 'dir') {
@@ -439,10 +475,13 @@ async function buildManifestAsync(node, includeFiles) {
         // 「含子目录」：递归抓取该目录下的完整子树（含尚未在 UI 加载的层）；
         // 已抓取过(_subtreeGathered)则直接复用缓存，避免每次刷新重复请求。
         if (c._includeSubtree && !c._subtreeGathered) await gatherSubtree(c);
-        children.push(await buildManifestAsync(c, includeFiles));
+        children.push(await buildManifestAsync(c, includeFiles, ctx));
       }
     } else if (includeFiles && c.checked) {
-      children.push({ name: c.name, type: 'file' });
+      const f = { name: c.name, type: 'file' };
+      // 「汇总文件大小」开启且已知字节数时，把单个文件大小写入清单。
+      if (ctx.includeSizes && typeof c.size === 'number' && c.size > 0) f.size = c.size;
+      children.push(f);
     }
   }
   // 标签（自动 + 手动，去重）合并进清单，便于读取侧按标签筛选/展示。
@@ -455,12 +494,100 @@ async function buildManifestAsync(node, includeFiles) {
   // 读取侧据此把该目录直接当底部节点，省去一次磁盘 /api/list 请求。
   if (node._leaf) out.leaf = true;
   if (merged.length) out.tags = merged;
+  // 目录汇总：该目录下所有文件（含子孙）的数量与总大小（字节）。
+  // 数据由后端 /api/summary 预取（按被选中的目录递归统计其子树），按绝对路径查表得到。
+  if (ctx.includeSizes && node.path) {
+    let sum = ctx.summaryByPath.get(node.path);
+    // 兜底：批量扫描成功、但个别路径缺失（如符号链接 / junction 导致 realpath 去重跳过、
+    // 或该目录不在批量根的覆盖范围内）时，单独补扫该目录子树，
+    // 确保「渲染出的每个目录」都能拿到大小，避免部分目录缺字段。
+    // 仅在批量扫描确有数据（bulkOk）时才补扫，避免批量整体失败时的请求风暴。
+    if (!sum && ctx.bulkOk) {
+      try {
+        const s = await fetchDriveSummary(node.path);
+        if (s) for (const [k, v] of Object.entries(s)) ctx.summaryByPath.set(k, v);
+        sum = ctx.summaryByPath.get(node.path);
+      } catch (_) { /* 单目录补扫失败不阻断整体 */ }
+    }
+    if (sum) {
+      out.fileCount = sum.fileCount;
+      out.totalSize = sum.totalSize;
+      node._summary = sum; // 缓存到树节点，供树形视图展示目录大小
+    }
+  }
   return out;
+}
+
+// 收集「需要扫描文件大小」的最小独立目录根：遍历整棵选择树，找出所有
+// checked / indeterminate 的目录节点，但**排除那些祖先（不含自身、不含虚拟根「此电脑」）
+// 已经 checked 的节点**——因为它们已被父目录整段覆盖，无需自成一根。
+// 返回的节点彼此不存在父子包含关系，后端对每个根递归扫描各自子树，绝不扫描未选中部分/整盘。
+function collectSummaryRoots(node, ancestorChecked) {
+  const result = [];
+  const isRealDir = node.kind === 'dir' && node.path;
+  const selected = node.checked || node.indeterminate;
+  // 当前节点作为一个独立扫描根：是真实目录、被选中、且未被祖先覆盖。
+  if (isRealDir && selected && !ancestorChecked) result.push(node);
+  // 向下覆盖规则：只要本节点（真实目录）被选中（将作为根扫描整棵子树），其子节点全部被覆盖，
+  // 无需再独立成根；否则继承祖先的覆盖标志。虚拟根「此电脑」的 checked 是容器语义，不向下覆盖。
+  const childAncestorChecked = ancestorChecked || (isRealDir && selected);
+  for (const c of (node.children || [])) {
+    if (c.kind === 'dir') result.push(...collectSummaryRoots(c, childAncestorChecked));
+  }
+  return result;
+}
+
+// 文件大小汇总缓存：按「被选中的目录路径」缓存 /api/summary 的结果（只扫该目录子树，
+// 不扫整盘），TTL 内复用，避免每次勾选/展开都重新扫描磁盘。
+const summaryCache = new Map(); // dirPath -> { at: timestamp, summaries }
+const SUMMARY_TTL = 120000;     // 缓存有效期 2 分钟（之后自动重新扫描以反映磁盘变化）
+
+async function fetchDriveSummary(dirPath) {
+  const cached = summaryCache.get(dirPath);
+  if (cached && (Date.now() - cached.at) < SUMMARY_TTL) return cached.summaries;
+  // 缓存未命中（或过期）：扫描该目录子树（只扫选中的范围，不扫整盘）。
+  setStatus('正在汇总选中目录的文件大小…');
+  // 前端超时兜底：单根扫描最多等 120s，超时/失败则放弃该根汇总（不附 fileCount/totalSize），
+  // 但绝不阻断清单生成——避免某块大盘扫描卡死导致整页预览永久不更新。
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 120000);
+  try {
+    const res = await fetch('/api/summary?path=' + encodeURIComponent(dirPath), { signal: ctrl.signal });
+    if (!res.ok) { summaryCache.set(dirPath, { at: Date.now(), summaries: null }); return null; }
+    const data = await res.json();
+    const sums = (data && data.summaries) || {};
+    summaryCache.set(dirPath, { at: Date.now(), summaries: sums });
+    return sums;
+  } catch (_) {
+    // 失败/超时也缓存（空结果），避免短时间内反复重试同一目录造成反复卡顿；
+    // 点「重新生成」会清空缓存，可主动重试。
+    summaryCache.set(dirPath, { at: Date.now(), summaries: null });
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function generateManifest(genAt) {
   const includeFiles = dom.optFiles.checked;
-  const rootManifest = await buildManifestAsync(state.root, includeFiles);
+  const includeSizes = dom.optSize.checked;
+  const ctx = { includeFiles, includeSizes, summaryByPath: new Map(), bulkOk: false };
+  // 仅当开启了「汇总文件数与大小」时，才去后端拿文件数与总大小。
+  // 关键优化：只把「被选中的目录」作为扫描根传给 /api/summary，后端只递归统计这些子树，
+  // 绝不扫描整块盘。通过 fetchDriveSummary 走内存缓存（按目录路径，TTL 2 分钟）。
+  if (includeSizes && state.root) {
+    const roots = collectSummaryRoots(state.root); // 最小独立扫描根（排除被祖先选中的）
+    for (const r of roots) {
+      try {
+        const sums = await fetchDriveSummary(r.path);
+        if (sums && Object.keys(sums).length) {
+          ctx.bulkOk = true; // 标记批量扫描确有数据，后续允许对个别缺失路径补扫
+          for (const [k, v] of Object.entries(sums)) ctx.summaryByPath.set(k, v);
+        }
+      } catch (_) { /* 单根统计失败不阻断整体 */ }
+    }
+  }
+  const rootManifest = await buildManifestAsync(state.root, includeFiles, ctx);
   return {
     version: 1,
     generatedAt: genAt || new Date().toISOString(),
@@ -470,11 +597,131 @@ async function generateManifest(genAt) {
   };
 }
 
-async function regenerate(genAt) {
+// 预览生成做防抖：勾选级联 / 连续展开会在 250ms 内多次调用，合并为一次真实生成，
+// 避免每次操作都触发整盘扫描导致预览长时间不更新。保留最后一次传入的 genAt（用于从
+// JSON 加载时保持原 generatedAt 时间戳）。
+let _regenTimer = null;
+let _regenGenAt = undefined;
+function regenerate(genAt) {
+  if (genAt !== undefined) _regenGenAt = genAt;
+  if (_regenTimer) clearTimeout(_regenTimer);
+  _regenTimer = setTimeout(() => {
+    _regenTimer = null;
+    const at = _regenGenAt;
+    _regenGenAt = undefined;
+    doRegenerate(at);
+  }, 250);
+}
+
+async function doRegenerate(genAt) {
   if (!state.root) return;
   const manifest = await generateManifest(genAt);
-  dom.preview.value = JSON.stringify(manifest, null, 2);
+  // 刷新树形视图：把刚计算出的目录大小（node._summary）显示到目录行上。
+  renderTree();
+  // 预览与上传保持一致：拆成 v2 格式——主机索引(version:2) + 每块盘一个卷文件，
+  // 与 uploadToRS 写入 RemoteStorage 的文件一一对应（文件名、结构完全一致）。
+  const file = dom.rsFile.value.trim() || state.computerId || 'fs-manifest';
+  const payload = buildV2Payload(manifest, file);
+  if (!payload.volumes.length && !payload.hostIndex.json.mounts.length) {
+    state.previewFiles = [];
+  } else {
+    state.previewFiles = [
+      { name: payload.hostIndex.name, content: JSON.stringify(payload.hostIndex.json, null, 2), isHost: true },
+      ...payload.volumes.map((v) => ({ name: v.name, content: JSON.stringify(v.json, null, 2), isHost: false })),
+    ];
+  }
+  renderPreview();
   updateCount();
+}
+
+// 由完整 manifest(version:1) 构建 v2 拆分的「上传载荷」——预览与上传共用同一份，确保两者一致。
+// 返回 { hostIndex: {name, json}, volumes: [{name, json}] }。
+function buildV2Payload(manifest, file) {
+  const drives = (manifest.root.children || []).filter((d) => d.type === 'folder');
+  const mounts = drives.map((d) => {
+    const vkey = volumeKeyFor(d);
+    return { letter: d.name, volumeId: d.volumeId || null, file: sanitizeKey(vkey) };
+  });
+  const hostIndex = {
+    version: 2,
+    source: manifest.source,
+    generatedAt: manifest.generatedAt,
+    generator: manifest.generator,
+    mounts,
+  };
+  const volumes = drives.map((d) => {
+    const vkey = volumeKeyFor(d);
+    const fname = sanitizeKey(vkey);
+    const json = {
+      volumeId: d.volumeId || null,
+      name: d.name,
+      type: 'folder',
+      children: d.children,
+      sources: [manifest.source],
+    };
+    return { key: vkey, name: fname + '.json', json };
+  });
+  const hostName = (file.endsWith('.json') ? file : file + '.json');
+  return { hostIndex: { name: sanitizeKey(hostName), json: hostIndex }, volumes };
+}
+
+// 渲染多卡片预览：每个上传文件一个只读窗口（主机索引 + 各卷文件），文件名与 RS 上一致。
+function renderPreview() {
+  const host = dom.preview;
+  host.innerHTML = '';
+  if (!state.previewFiles || !state.previewFiles.length) {
+    const p = document.createElement('p');
+    p.className = 'empty-hint';
+    p.textContent = '请勾选要包含的目录，生成后在此预览上传到 RemoteStorage 的 v2 清单。';
+    host.appendChild(p);
+    return;
+  }
+  for (const f of state.previewFiles) {
+    const card = document.createElement('div');
+    card.className = 'preview-card' + (f.isHost ? ' host-card' : '');
+    const head = document.createElement('div');
+    head.className = 'preview-card-head';
+    const title = document.createElement('span');
+    title.className = 'preview-card-title';
+    title.textContent = f.name + (f.isHost ? '（主机索引 · v2）' : '（卷文件 · v2）');
+    const spacer = document.createElement('span');
+    spacer.className = 'spacer';
+    const copyBtn = document.createElement('button');
+    copyBtn.className = 'btn btn-sm';
+    copyBtn.textContent = '复制';
+    copyBtn.addEventListener('click', () => copyText(f.content, f.name));
+    // 展开 / 收起：默认上限高度 + 滚动；点「展开」则放开高度看完整大文件。
+    const toggleBtn = document.createElement('button');
+    toggleBtn.className = 'btn btn-sm';
+    toggleBtn.textContent = '展开';
+    toggleBtn.addEventListener('click', () => {
+      const exp = card.classList.toggle('expanded');
+      toggleBtn.textContent = exp ? '收起' : '展开';
+    });
+    head.appendChild(title);
+    head.appendChild(spacer);
+    head.appendChild(toggleBtn);
+    head.appendChild(copyBtn);
+    const ta = document.createElement('textarea');
+    ta.className = 'preview-card-body';
+    ta.readOnly = true;
+    ta.value = f.content;
+    // 高度随内容自适应（上限避免过长；点「展开」可放开看完整内容）
+    ta.style.height = Math.min(ta.scrollHeight + 12, 420) + 'px';
+    card.appendChild(head);
+    card.appendChild(ta);
+    host.appendChild(card);
+  }
+}
+
+// 复制单个预览文件的内容。
+async function copyText(content, name) {
+  try {
+    await navigator.clipboard.writeText(content);
+    setStatus('已复制 ' + name + ' 到剪贴板。');
+  } catch {
+    setStatus('复制失败，请手动选择文本复制。', true);
+  }
 }
 
 function countIncludedDirs(node) {
@@ -499,25 +746,110 @@ function updateCount() {
 
 /* ---------------- 导出 ---------------- */
 
+// 把多个 v2 文件打包成 ZIP（store 存储，无压缩，零依赖）下载，
+// 解压后即为上传到 RemoteStorage 的同一组文件，保证「下载 = 预览 = 上传」。
 function downloadJSON() {
-  if (!state.root) return;
-  const blob = new Blob([dom.preview.value], { type: 'application/json' });
+  if (!state.previewFiles || !state.previewFiles.length) return;
+  const blob = buildZipBlob(state.previewFiles.map((f) => ({ name: f.name, content: f.content })));
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = 'fs-manifest.json';
+  a.download = (dom.rsFile.value.trim() || state.computerId || 'fs-manifest') + '.zip';
   a.click();
   URL.revokeObjectURL(url);
 }
 
 async function copyJSON() {
-  if (!state.root) return;
+  if (!state.previewFiles || !state.previewFiles.length) return;
+  const combined = state.previewFiles
+    .map((f) => '// ' + f.name + '\n' + f.content)
+    .join('\n\n');
   try {
-    await navigator.clipboard.writeText(dom.preview.value);
-    setStatus('已复制到剪贴板。');
+    await navigator.clipboard.writeText(combined);
+    setStatus('已复制全部清单文件（' + state.previewFiles.length + ' 个）到剪贴板。');
   } catch {
     setStatus('复制失败，请手动选择文本复制。', true);
   }
+}
+
+// 极简 ZIP 写入（store 方法，纯 JS 零依赖）：输入 [{name, content}]，返回 Blob。
+function buildZipBlob(files) {
+  const enc = new TextEncoder();
+  // 预计算 CRC32 表
+  const crcTable = (() => {
+    const t = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      t[n] = c >>> 0;
+    }
+    return t;
+  })();
+  const crc32 = (bytes) => {
+    let c = 0xFFFFFFFF;
+    for (let i = 0; i < bytes.length; i++) c = crcTable[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+    return (c ^ 0xFFFFFFFF) >>> 0;
+  };
+  const parts = [];
+  const central = [];
+  let offset = 0;
+  for (const f of files) {
+    const nameBytes = enc.encode(f.name);
+    const dataBytes = enc.encode(f.content);
+    const crc = crc32(dataBytes);
+    const size = dataBytes.length;
+    const lh = new DataView(new ArrayBuffer(30));
+    lh.setUint32(0, 0x04034b50, true);
+    lh.setUint16(4, 20, true);
+    lh.setUint16(6, 0, true);
+    lh.setUint16(8, 0, true);
+    lh.setUint16(10, 0, true);
+    lh.setUint16(12, 0, true);
+    lh.setUint32(14, crc, true);
+    lh.setUint32(18, size, true);
+    lh.setUint32(22, size, true);
+    lh.setUint16(26, nameBytes.length, true);
+    lh.setUint16(28, 0, true);
+    parts.push(new Uint8Array(lh.buffer), nameBytes, dataBytes);
+    const cd = new DataView(new ArrayBuffer(46));
+    cd.setUint32(0, 0x02014b50, true);
+    cd.setUint16(4, 20, true);
+    cd.setUint16(6, 20, true);
+    cd.setUint16(8, 0, true);
+    cd.setUint16(10, 0, true);
+    cd.setUint16(12, 0, true);
+    cd.setUint16(14, 0, true);
+    cd.setUint32(16, crc, true);
+    cd.setUint32(20, size, true);
+    cd.setUint32(24, size, true);
+    cd.setUint16(28, nameBytes.length, true);
+    cd.setUint16(30, 0, true);
+    cd.setUint16(32, 0, true);
+    cd.setUint16(34, 0, true);
+    cd.setUint16(36, 0, true);
+    cd.setUint32(38, 0, true);
+    cd.setUint32(42, offset, true);
+    central.push({ head: new Uint8Array(cd.buffer), name: nameBytes });
+    offset += 30 + nameBytes.length + size;
+  }
+  let centralSize = 0;
+  const centralParts = [];
+  for (const c of central) {
+    centralParts.push(c.head, c.name);
+    centralSize += c.head.length + c.name.length;
+  }
+  const centralOffset = offset;
+  const eo = new DataView(new ArrayBuffer(22));
+  eo.setUint32(0, 0x06054b50, true);
+  eo.setUint16(4, 0, true);
+  eo.setUint16(6, 0, true);
+  eo.setUint16(8, files.length, true);
+  eo.setUint16(10, files.length, true);
+  eo.setUint32(12, centralSize, true);
+  eo.setUint32(16, centralOffset, true);
+  eo.setUint16(20, 0, true);
+  parts.push(...centralParts, new Uint8Array(eo.buffer));
+  return new Blob(parts, { type: 'application/zip' });
 }
 
 /* ---------------- 按卷拆分上传 + 深挖标记应用 ---------------- */
@@ -653,64 +985,39 @@ async function uploadToRS() {
 
     const manifest = await generateManifest();
 
-    // 2) 主机索引：只记录「本机挂了哪些盘、挂在哪个盘符、稳定身份是什么」。
-    const mounts = manifest.root.children.map((d) => {
-      const vkey = volumeKeyFor(d);
-      return { letter: d.name, volumeId: d.volumeId || null, file: sanitizeKey(vkey) };
-    });
-    const hostIndex = {
-      version: 2,
-      source: manifest.source,
-      generatedAt: manifest.generatedAt,
-      generator: manifest.generator,
-      mounts,
-    };
+    // 2) 复用与预览相同的 v2 拆分逻辑，保证「上传内容 == 预览内容」。
+    const payload = buildV2Payload(manifest, file);
 
-    // 3) 逐块盘：拆分出独立卷文件，与远端已有卷文件并集合并（多主机选择累加）后上传。
+    // 3) 逐块盘：把卷文件与远端已有卷文件并集合并（多主机选择累加）后上传。
     const headers = { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' };
     let uploaded = 0;
-    for (const d of manifest.root.children) {
-      // 注意：这里 d 是 buildManifest 产出的 manifest 节点，字段是 type:'folder'，
-      // 不是内存树节点的 kind:'dir'，之前误判 d.kind 导致所有驱动被跳过、卷文件不上传。
-      if (d.type !== 'folder') continue;
-      const vkey = volumeKeyFor(d);
-      const fname = sanitizeKey(vkey);
-      const incoming = {
-        volumeId: d.volumeId || null,
-        name: d.name,
-        type: 'folder',
-        children: d.children,
-        sources: [manifest.source],
-      };
+    for (const vol of payload.volumes) {
       // 拉取已有卷文件（可能由其他主机上传过同一块盘）。
       let existing = null;
       try {
-        const g = await fetch(joinUrl(joinUrl(href, base), fname + '.json'), {
+        const g = await fetch(joinUrl(joinUrl(href, base), vol.name), {
           headers: { 'Authorization': 'Bearer ' + token },
         });
         if (g.ok) existing = await g.json().catch(() => null);
       } catch (_) { /* 远端无该卷文件 → 直接上传 */ }
       const merged = existing && Array.isArray(existing.children)
-        ? mergeVolumeTrees(existing, incoming)
-        : incoming;
+        ? mergeVolumeTrees(existing, vol.json)
+        : vol.json;
       const srcSet = new Set([
         ...(existing && Array.isArray(existing.sources) ? existing.sources : []),
-        ...incoming.sources,
+        ...vol.json.sources,
       ]);
       merged.sources = [...srcSet];
 
-      const vurl = joinUrl(joinUrl(href, base), fname + '.json');
+      const vurl = joinUrl(joinUrl(href, base), vol.name);
       const vres = await fetch(vurl, { method: 'PUT', headers, body: JSON.stringify(merged, null, 2) });
-      if (!vres.ok) throw new Error('HTTP ' + vres.status + ' (' + fname + ')');
+      if (!vres.ok) throw new Error('HTTP ' + vres.status + ' (' + vol.name + ')');
       uploaded++;
     }
 
-    // 4) 上传主机索引。
-    // 主机索引文件名：rsFile 可能已带 .json（如 LAPTOP-91PR81Q2.json），
-    // 这里保证只补一次后缀，避免生成 LAPTOP-91PR81Q2.json.json。
-    const hostName = (file.endsWith('.json') ? file : file + '.json');
-    const hurl = joinUrl(joinUrl(href, base), sanitizeKey(hostName));
-    const hres = await fetch(hurl, { method: 'PUT', headers, body: JSON.stringify(hostIndex, null, 2) });
+    // 4) 上传主机索引（文件名 = rsFile，已带 .json 则不再重复补后缀）。
+    const hurl = joinUrl(joinUrl(href, base), payload.hostIndex.name);
+    const hres = await fetch(hurl, { method: 'PUT', headers, body: JSON.stringify(payload.hostIndex.json, null, 2) });
     if (!hres.ok) throw new Error('HTTP ' + hres.status + ' (host index)');
 
     let msg = '上传成功：' + uploaded + ' 个卷 + 主机索引';
@@ -748,6 +1055,7 @@ function collectSettings() {
     rsBase: dom.rsBase.value.trim(),
     rsFile: dom.rsFile.value.trim(),
     optFiles: dom.optFiles.checked,
+    optSize: dom.optSize.checked,
   };
 }
 async function saveSettings() {
@@ -777,6 +1085,8 @@ async function loadSettings() {
   }
   dom.rsFile.value = (s && s.rsFile != null) ? s.rsFile : (fileDefault || 'fs-manifest');
   dom.optFiles.checked = (s && typeof s.optFiles === 'boolean') ? s.optFiles : false;
+  // 「汇总文件数与大小」默认开启（文件大小汇总通常都有用）。
+  dom.optSize.checked = (s && typeof s.optSize === 'boolean') ? s.optSize : true;
 }
 
 /* ---------------- 加载外部 JSON 并展开目录树 ---------------- */
@@ -907,12 +1217,46 @@ async function applyManifest(manifest) {
   setStatus('已根据清单展开并勾选目录（未匹配到的盘符/路径已跳过）。');
 }
 
+// 把一份已解析的清单（v1 或 v2）应用到当前磁盘树。
+// v1：直接 applyManifest；v2 主机索引：按 mounts 逐个拉取卷文件，重组成 v1 合并树后再 applyManifest。
+// fetchVolume(mountFileNoExt) => Promise<volObj|null>。
+async function applyLoadedDoc(doc, fetchVolume) {
+  if (doc && doc.version === 2) {
+    const children = [];
+    for (const m of (doc.mounts || [])) {
+      const vol = await fetchVolume(m.file); // m.file 为不含 .json 的安全键
+      if (!vol) continue;
+      children.push({
+        name: m.letter,
+        type: 'folder',
+        volumeId: vol.volumeId || m.volumeId || null,
+        children: vol.children || [],
+      });
+    }
+    const combined = {
+      version: 1,
+      source: doc.source,
+      generatedAt: doc.generatedAt,
+      generator: doc.generator,
+      root: { name: doc.source, type: 'folder', children },
+    };
+    await applyManifest(combined);
+    return combined;
+  }
+  await applyManifest(doc);
+  return doc;
+}
+
 function loadLocalJSON(file) {
   const reader = new FileReader();
   reader.onload = async () => {
     try {
-      const manifest = JSON.parse(String(reader.result));
-      await applyManifest(manifest);
+      const doc = JSON.parse(String(reader.result));
+      if (doc && doc.version === 2) {
+        setStatus('检测到 v2 主机索引：本地单文件不含卷数据，无法重建目录树。请用「从 RS 加载」，或加载 v1 合并清单。', true);
+        return;
+      }
+      await applyManifest(doc);
     } catch (err) {
       setStatus('解析本地 JSON 失败：' + err.message, true);
     }
@@ -931,14 +1275,22 @@ async function loadRemoteJSON() {
   try {
     const res = await fetch(url, { headers: { 'Authorization': 'Bearer ' + token } });
     if (!res.ok) throw new Error('HTTP ' + res.status);
-    const manifest = await res.json();
-    await applyManifest(manifest);
+    const doc = await res.json();
+    // v2 主机索引需逐个拉取卷文件；v1 直接应用。
+    const fetchVolume = async (mountFile) => {
+      const vurl = joinUrl(joinUrl(href, base), mountFile + '.json');
+      try {
+        const vres = await fetch(vurl, { headers: { 'Authorization': 'Bearer ' + token } });
+        if (!vres.ok) return null;
+        return await vres.json().catch(() => null);
+      } catch (_) { return null; }
+    };
+    const combined = await applyLoadedDoc(doc, fetchVolume);
     // 加载后：按 folder_deepen 里列的目录下钻展示（保留标记，不清空），
     // 使这些深挖目录也在树中出现并带上「深挖」徽章。
     const deepen = await applyDeepenMarks(false);
     renderTree();
-    regenerate(manifest.generatedAt);
-    console.log('[dir-struct] folder_deepen 结果:', deepen);
+    regenerate(combined.generatedAt);
     let extra = deepen.total
       ? '；已按 folder_deepen 下钻 ' + deepen.total + ' 个目录（标记保留）'
       : '；folder_deepen 未读到任何可下钻目录';
@@ -952,7 +1304,8 @@ async function loadRemoteJSON() {
 /* ---------------- 事件绑定 ---------------- */
 
 dom.optFiles.addEventListener('change', () => { renderTree(); regenerate(); });
-dom.btnRegen.addEventListener('click', regenerate);
+dom.optSize.addEventListener('change', () => { renderTree(); regenerate(); });
+dom.btnRegen.addEventListener('click', () => { summaryCache.clear(); regenerate(); });
 dom.btnCopy.addEventListener('click', copyJSON);
 dom.btnDownload.addEventListener('click', downloadJSON);
 dom.btnUpload.addEventListener('click', uploadToRS);
@@ -988,13 +1341,41 @@ dom.inputLoadFile.addEventListener('change', () => {
 dom.btnLoadRemote.addEventListener('click', loadRemoteJSON);
 
 // RemoteStorage 参数 / 选项变更时自动持久化（刷新后自动填入）
-[dom.rsHref, dom.rsToken, dom.rsBase, dom.rsFile, dom.optFiles].forEach((el) => {
+[dom.rsHref, dom.rsToken, dom.rsBase, dom.rsFile, dom.optFiles, dom.optSize].forEach((el) => {
   el.addEventListener('change', saveSettings);
 });
 
 // 启动时列出本机磁盘，并回填已保存的 UI 参数
 loadInitial();
 loadSettings();
+
+// 左右分栏拖动：拖动中间分隔条调整「目录树」与「清单预览」的宽度占比。
+(function initSplitter() {
+  const splitter = $('splitter');
+  const layout = document.querySelector('.layout');
+  const treePane = $('tree-pane');
+  if (!splitter || !layout || !treePane) return;
+  let dragging = false;
+  splitter.addEventListener('mousedown', (e) => {
+    dragging = true;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    e.preventDefault();
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const rect = layout.getBoundingClientRect();
+    let x = e.clientX - rect.left;
+    x = Math.max(180, Math.min(rect.width - 260, x)); // 左右各留最小宽度
+    treePane.style.flex = '0 0 ' + x + 'px';
+  });
+  window.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  });
+})();
 
 // 页面顶部显示程序版本号（来自后端 /api/version，便于识别当前运行的代码版本）
 fetch('/api/version')
