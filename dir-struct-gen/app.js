@@ -114,14 +114,46 @@ async function loadInitial() {
 
 /* ---------------- 懒加载：点开一层，向服务器请求下一层 ---------------- */
 
+// 把后端 /api/list 返回的 items 应用到节点（生成子节点），提取为共用函数，供缓存命中与网络请求两条路径复用。
+function applyListItems(node, items) {
+  const kids = items.map((it) => {
+    const k = makeNode(it.name, it.kind, joinPath(node.path, it.name), node);
+    if (it.kind === 'file') {
+      // 承接后端 /api/list 返回的文件大小（字节），供「包含文件」时写入清单。
+      if (typeof it.size === 'number') k.size = it.size;
+    } else {
+      k.tags = it.tags || []; // 承接后端自动标签
+      // 后端已确认该目录无任何子目录 → 叶子（未加载也不显示展开按钮）
+      if (it.hasSubdir === false) k._leaf = true;
+    }
+    return k;
+  });
+  node.children = kids;
+  // 缺省不选中：新展开的子目录不继承父节点勾选态，
+  // 避免「展开已勾选目录时自动选中其子目录」（子目录需单独勾选）。
+  node._loaded = true;
+  // 底部节点：磁盘上「无任何子目录」（即使有文件）即为叶子 → 渲染时无展开按钮。
+  node._leaf = !node.children.some((c) => c.kind === 'dir');
+}
+
 async function loadChildren(node, silent = false) {
   if (node.kind !== 'dir' || node._loaded || !node.path) return;
+  // 仅当「包含文件 + 汇总文件大小」同时开启时，请求时带 sizes=1，
+  // 让后端对每个文件 stat 取字节数（用于清单里单个文件的 size 字段），避免拖慢日常浏览。
+  const needSizes = dom.optFiles.checked && dom.optSize.checked;
+  const cacheKey = node.path + (needSizes ? '#s' : '');
+  // 先查前端目录缓存：命中且在有效期内则直接复用，不向服务器请求（折叠重开、加载 JSON 后重建树、
+  // 切换「含子目录」后重展开等场景均受益于该缓存，同一个目录绝不重复取）。
+  const cached = dirCache.get(cacheKey);
+  if (cached && (Date.now() - cached.at) < DIR_CACHE_TTL) {
+    applyListItems(node, cached.items);
+    setStatus('已加载（缓存）：' + node.path + '（' + cached.items.length + ' 项）');
+    if (!silent) regenerate();
+    return;
+  }
   node._loading = true;
   renderTree(); // 显示「加载中…」
   try {
-    // 仅当「包含文件 + 汇总文件大小」同时开启时，请求时带 sizes=1，
-    // 让后端对每个文件 stat 取字节数（用于清单里单个文件的 size 字段），避免拖慢日常浏览。
-    const needSizes = dom.optFiles.checked && dom.optSize.checked;
     const qs = '/api/list?path=' + encodeURIComponent(node.path) + (needSizes ? '&sizes=1' : '');
     const res = await fetch(qs);
     if (!res.ok) {
@@ -130,25 +162,10 @@ async function loadChildren(node, silent = false) {
     }
     const data = await res.json();
     const items = data.items || [];
-    const kids = items.map((it) => {
-      const k = makeNode(it.name, it.kind, joinPath(node.path, it.name), node);
-      if (it.kind === 'file') {
-        // 承接后端 /api/list 返回的文件大小（字节），供「包含文件」时写入清单。
-        if (typeof it.size === 'number') k.size = it.size;
-      } else {
-        k.tags = it.tags || []; // 承接后端自动标签
-        // 后端已确认该目录无任何子目录 → 叶子（未加载也不显示展开按钮）
-        if (it.hasSubdir === false) k._leaf = true;
-      }
-      return k;
-    });
-    node.children = kids;
-    // 缺省不选中：新展开的子目录不继承父节点勾选态，
-    // 避免「展开已勾选目录时自动选中其子目录」（子目录需单独勾选）。
-    node._loaded = true;
-    // 底部节点：磁盘上「无任何子目录」（即使有文件）即为叶子 → 渲染时无展开按钮。
-    node._leaf = !node.children.some((c) => c.kind === 'dir');
-    setStatus('已加载：' + node.path + '（' + kids.length + ' 项）');
+    // 写入前端目录缓存，供后续复用。
+    dirCache.set(cacheKey, { items, at: Date.now() });
+    applyListItems(node, items);
+    setStatus('已加载：' + node.path + '（' + items.length + ' 项）');
   } catch (err) {
     // 权限不足 / 结点不可读（如 Windows 的 Documents and Settings、$Recycle.Bin 等）：
     // 不报红、不再重试，标记为不可展开的 🔒 节点，但仍可勾选（勾选则作为空文件夹进清单）。
@@ -440,12 +457,31 @@ async function gatherSubtree(node, visited) {
   } catch (_) { return; }
   const tree = data && data.tree;
   if (!tree) return;
+  // 把这次一次性拉回的整棵子树逐层写入前端目录缓存：即便之后切换「含子目录」、节点对象被重置，
+  // 再展开这些层级也直接命中缓存，不再回退到逐层 /api/list 请求。
+  cacheTreeLevel(node.path, tree.children || []);
   // 把后端返回的嵌套 folder 树转成前端内存树节点（默认全勾选），供 buildManifestAsync 继续下钻。
   node.children = treeToLiveChildren(node, tree.children || []);
   node._loaded = true;
   node._collapsed = true;
   node._leaf = !node.children.some((c) => c.kind === 'dir');
   node._subtreeGathered = true;
+}
+
+// 把后端 /api/tree 返回的整棵子树逐层写入前端目录缓存（dirCache），键为该目录的绝对路径。
+// 归一化为 /api/list 的 item 形状（{name, kind, tags, hasSubdir}），使缓存命中路径与 lazy 加载完全一致。
+function cacheTreeLevel(dirPath, treeChildren) {
+  const items = [];
+  for (const t of treeChildren) {
+    if (t.kind === 'dir') {
+      const childPath = joinPath(dirPath, t.name);
+      items.push({ name: t.name, kind: 'dir', tags: t.tags || [], hasSubdir: t.hasSubdir });
+      if (t.children && t.children.length) cacheTreeLevel(childPath, t.children);
+    } else if (t.kind === 'file') {
+      items.push({ name: t.name, kind: 'file' });
+    }
+  }
+  dirCache.set(dirPath, { items, at: Date.now() });
 }
 
 // 把后端 /api/tree 的嵌套 folder 树转成前端内存树节点：子目录默认勾选、已加载、收起，
@@ -506,7 +542,7 @@ async function buildManifestAsync(node, includeFiles, ctx) {
   // 递归统计整棵子树，单次请求即返回 path -> {fileCount,totalSize} 的完整映射（含所有子孙目录）。
   // 因此这里只做查表，前端绝不再逐目录发请求；后端已保证每个目录（含符号链接指向的）都有记录。
   if (ctx.includeSizes && node.path) {
-    const sum = ctx.summaryByPath.get(node.path);
+    const sum = getSummary(node.path); // 直查路径级缓存（含该目录整棵子树曾被一次性取回）
     if (sum) {
       out.fileCount = sum.fileCount;
       out.totalSize = sum.totalSize;
@@ -548,40 +584,60 @@ function collectSummaryRoots(node, ancestorChecked) {
   return result;
 }
 
-// 文件大小汇总缓存：按「被选中的根路径集合」缓存 /api/summary 的结果。后端对每个根递归统计
-// 整棵子树，单次请求即返回所有目录（含子孙）的 fileCount/totalSize；前端只发起这一次请求，
-// 之后只做查表，绝不再逐目录请求。TTL 内复用，避免短时间内重复扫描磁盘。
-const summaryCache = new Map(); // rootsKey -> { at: timestamp, summaries }
+// 文件大小汇总缓存：按「单个目录路径」缓存 /api/summary 的结果。后端对每个根递归统计整棵子树，
+// 单次请求即返回该根下所有目录（含子孙）的 fileCount/totalSize；前端把返回的每个目录都写进本缓存，
+// 因此「取消勾选/重选」导致扫描根集合变化时，已扫描过的子树仍命中本缓存，绝不会重复扫描整块父目录。
+// TTL 内复用，避免短时间内重复扫描磁盘。
+const summaryCache = new Map(); // path -> { fileCount, totalSize, at }
 const SUMMARY_TTL = 120000;     // 缓存有效期 2 分钟（之后自动重新扫描以反映磁盘变化）
 
-// 一次性把「被选中的目录」全部发给后端，单次请求取回它们各自子树（含所有子孙目录）的大小映射。
+// 从路径级缓存取某目录的汇总；过期或缺失返回 null。后端曾把该目录连同其整棵子树一起返回并写入缓存，
+// 故直接查本缓存即可拿到「含子孙」的任意目录大小，无需重新请求后端。
+function getSummary(path) {
+  if (!path) return null;
+  const c = summaryCache.get(path);
+  if (!c) return null;
+  if ((Date.now() - c.at) >= SUMMARY_TTL) return null;
+  return c;
+}
+
+// 目录浏览缓存：按「绝对路径」缓存该目录已加载的子项列表，跨节点对象重建（加载 JSON 清单、
+// 切换「含子目录」等会把 _loaded 重置的场景）依然有效，从根上避免对同一个目录重复请求 /api/list。
+// 键区分是否含文件大小两种返回（needSizes），二者数据结构不同。TTL 内复用，过期后重新拉取以反映磁盘变化。
+const dirCache = new Map(); // key(path + '#s'|'') -> { items, at }
+const DIR_CACHE_TTL = 5 * 60 * 1000; // 5 分钟
+
+// 一次性把「被选中的目录」里【尚未缓存/已过期】的根发给后端，单次请求取回它们各自子树
+// （含所有子孙目录）的大小映射；其余根直接复用路径级缓存（含其整棵子树），绝不重复扫描磁盘。
 // rootPaths：最小独立扫描根（已被 collectSummaryRoots 排除掉被祖先覆盖的目录，故彼此无包含关系）。
 async function fetchAllSummaries(rootPaths) {
-  if (!rootPaths || !rootPaths.length) return null;
+  if (!rootPaths || !rootPaths.length) return;
   const uniq = [...new Set(rootPaths)];
-  const key = uniq.slice().sort().join('\u0000'); // 去重 + 稳定键，便于跨次复用缓存
-  const cached = summaryCache.get(key);
-  if (cached && (Date.now() - cached.at) < SUMMARY_TTL) return cached.summaries;
+  const now = Date.now();
+  // 只挑「路径级缓存缺失或过期」的根；由于之前取某根时已将其整棵子树一并写入缓存，
+  // 因此命中缓存的根意味着它和它所有子孙都已在缓存，无需再请求——这是取消勾选后不重扫父目录的关键。
+  const missing = uniq.filter(p => {
+    const c = summaryCache.get(p);
+    return !c || (now - c.at) >= SUMMARY_TTL;
+  });
+  if (missing.length === 0) return; // 全部命中缓存，后端零请求
   setStatus('正在汇总选中目录的文件大小…');
-  // 把所有根拼进同一个 /api/summary 请求（?path=A&path=B&…），后端对每个根递归统计整棵子树，
-  // 一次返回所有目录的大小，避免前端逐目录请求。
-  const q = uniq.map(p => 'path=' + encodeURIComponent(p)).join('&');
+  // 把所有缺失根拼进同一个 /api/summary 请求（?path=A&path=B&…），后端对每个根递归统计整棵子树，
+  // 一次返回所有目录（含子孙）的大小，避免前端逐目录请求。
+  const q = missing.map(p => 'path=' + encodeURIComponent(p)).join('&');
   // 前端超时兜底：整轮汇总最多等 3 分钟，超时/失败则放弃大小汇总（不附 fileCount/totalSize），
   // 但绝不阻断清单生成——避免某块大盘扫描卡死导致整页预览永久不更新。
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 180000);
   try {
     const res = await fetch('/api/summary?' + q, { signal: ctrl.signal });
-    if (!res.ok) { summaryCache.set(key, { at: Date.now(), summaries: null }); return null; }
+    if (!res.ok) return;
     const data = await res.json();
     const sums = (data && data.summaries) || {};
-    summaryCache.set(key, { at: Date.now(), summaries: sums });
-    return sums;
+    // 把后端返回的每一个目录（含所有子孙）都写进路径级缓存，供本次及后续（扫描根变化后）直接复用。
+    for (const [k, v] of Object.entries(sums)) summaryCache.set(k, { fileCount: v.fileCount, totalSize: v.totalSize, at: now });
   } catch (_) {
-    // 失败/超时也缓存（空结果），避免短时间内反复重试同一批目录造成反复卡顿；
-    // 点「重新生成」会清空缓存，可主动重试。
-    summaryCache.set(key, { at: Date.now(), summaries: null });
-    return null;
+    // 失败/超时：本次放弃大小汇总，但不写脏缓存；下次 regenerate 仍会重试缺失根。
   } finally {
     clearTimeout(timer);
   }
@@ -623,7 +679,7 @@ async function ensureDriveVolumeIds() {
 async function generateManifest(genAt) {
   const includeFiles = dom.optFiles.checked;
   const includeSizes = dom.optSize.checked;
-  const ctx = { includeFiles, includeSizes, summaryByPath: new Map() };
+  const ctx = { includeFiles, includeSizes };
   // 仅当开启了「汇总文件数与大小」时，才去后端拿文件数与总大小。
   // 关键优化：只把「被选中的目录」作为扫描根传给 /api/summary，后端只递归统计这些子树，
   // 绝不扫描整块盘；且前端只发一次请求（所有根一起带过去），后端递归返回每棵子树全部目录的大小，
@@ -635,11 +691,9 @@ async function generateManifest(genAt) {
   await ensureDriveVolumeIds();
   if (includeSizes && state.root) {
     const roots = collectSummaryRoots(state.root); // 最小独立扫描根（排除被祖先选中的）
-    // 一次性把所有根一起发给后端，单次请求取回所有目录（含子孙）的大小映射。
-    const sums = await fetchAllSummaries(roots.map(r => r.path));
-    if (sums && Object.keys(sums).length) {
-      for (const [k, v] of Object.entries(sums)) ctx.summaryByPath.set(k, v);
-    }
+    // 把「尚未缓存/过期」的根批量发给后端；已缓存（含各自整棵子树）的根直接命中 summaryCache，
+    // 取消勾选/重选导致根集合变化时也不会重复扫描父目录。
+    await fetchAllSummaries(roots.map(r => r.path));
   }
   const rootManifest = await buildManifestAsync(state.root, includeFiles, ctx);
   return {
