@@ -589,27 +589,33 @@ async function fetchAllSummaries(rootPaths) {
 
 // 生成清单前，对「实际纳入索引」的盘根惰性写入磁盘身份标记文件（稳定 volumeId，跨主机去重用）。
 // 调用后端 POST /api/volume-id（异步、best-effort、带超时），失败也不影响生成（回退序列号/主机::盘符）。
-// 注意：列举阶段（/api/drives）只读不写，故启动/列驱动飞快；写入只在这里对用到的盘发生。
+// 注意：列举阶段（/api/drives）已为每个盘填好 volumeId（序列号回退），manifest 只认该值；正常流程下
+// 所有盘早已有 volumeId，下面循环直接跳过、不会再发请求——避免每次勾选/展开都反复向服务器查 C: 盘序列号。
+// 仅在「确实还没有 volumeId」的盘上才惰性写一次，且每个盘单会话只尝试一次（_vidTried 去重）。
+const _vidTried = new Set();
 async function ensureDriveVolumeIds() {
   if (!state.root || !state.root.children) return;
   const jobs = [];
   for (const d of state.root.children) {
+    if (d.kind !== 'dir' || !d.path) continue;
+    // 已有 volumeId（来自 /api/drives）或本会话已尝试过：跳过，绝不重复请求/写盘。
+    if (d.volumeId || _vidTried.has(d.path)) continue;
     // 仅「被选中(checked)或半选(indeterminate)」的盘才需要稳定身份——其余盘不在清单里。
-    if (d.kind === 'dir' && d.path && (d.checked || d.indeterminate)) {
-      jobs.push((async () => {
-        try {
-          const res = await fetch('/api/volume-id', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ path: d.path }),
-          });
-          if (res.ok) {
-            const data = await res.json();
-            if (data && data.volumeId) d.volumeId = data.volumeId;
-          }
-        } catch (_) { /* best-effort，忽略 */ }
-      })());
-    }
+    if (!(d.checked || d.indeterminate)) continue;
+    _vidTried.add(d.path);
+    jobs.push((async () => {
+      try {
+        const res = await fetch('/api/volume-id', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: d.path }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data && data.volumeId) d.volumeId = data.volumeId;
+        }
+      } catch (_) { /* best-effort，忽略 */ }
+    })());
   }
   await Promise.all(jobs);
 }
