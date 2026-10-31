@@ -126,8 +126,10 @@ function applyListItems(node, items) {
   const kids = items.map((it) => {
     const k = makeNode(it.name, it.kind, joinPath(node.path, it.name), node);
     if (it.kind === 'file') {
-      // 承接后端 /api/list 返回的文件大小（字节），供「包含文件」时写入清单。
+      // 承接后端 /api/list 返回的两个数值（逻辑大小 + 占用磁盘空间），供「包含文件」时写入清单。
+      // 后端取不到时会缺省（不写假 0），这里也就跟着缺省。
       if (typeof it.size === 'number') k.size = it.size;
+      if (typeof it.sizeOnDisk === 'number') k.sizeOnDisk = it.sizeOnDisk;
     } else {
       k.tags = it.tags || []; // 承接后端自动标签
       // 后端已确认该目录无任何子目录 → 叶子（未加载也不显示展开按钮）
@@ -333,9 +335,16 @@ function renderNode(node, isRoot = false) {
   let hasSize = false;
   const sum = node.kind === 'dir' ? getSummary(node.path) : null;
   if (sum) {
-    sizeInfo.textContent = formatCount(sum.fileCount) + ' 项 · ' + formatSize(sum.totalSize);
+    // 数值只是下界（子树里有读不到或超出深度上限的部分）时加「≥」前缀，避免被当成精确值。
+    // 徽标同时展示两个数值：逻辑大小（大小）与占用磁盘空间（占用）。
+    sizeInfo.textContent = (sum.partial ? '≥ ' : '') + formatCount(sum.fileCount) + ' 项 · 大小 ' + formatSize(sum.totalSize)
+      + (typeof sum.totalSizeOnDisk === 'number' ? ' · 占用 ' + formatSize(sum.totalSizeOnDisk) : '');
     const upd = sum.at ? ' · 更新于 ' + new Date(sum.at).toLocaleTimeString() : '';
-    sizeInfo.title = '文件数 ' + sum.fileCount + ' · 总大小 ' + sum.totalSize + ' 字节' + upd;
+    sizeInfo.title = '文件数 ' + sum.fileCount
+      + ' · 逻辑大小合计 ' + sum.totalSize + ' 字节'
+      + (typeof sum.totalSizeOnDisk === 'number' ? ' · 占用磁盘空间合计 ' + sum.totalSizeOnDisk + ' 字节' : '')
+      + upd
+      + (sum.partial ? '（下界：子树里有读不到或超出深度上限的部分）' : '');
     hasSize = true;
   }
 
@@ -519,6 +528,10 @@ function treeToLiveChildren(parent, treeChildren) {
       // 无子目录（即使有文件）即为底部节点：渲染时无展开按钮。
       child._leaf = !child.children.some((c) => c.kind === 'dir');
       child._subtreeGathered = true;
+    } else {
+      // 文件节点：承接后端 /api/tree 带回来的两个数值（逻辑大小 + 占用磁盘空间；取不到则缺省）。
+      if (typeof t.size === 'number') child.size = t.size;
+      if (typeof t.sizeOnDisk === 'number') child.sizeOnDisk = t.sizeOnDisk;
     }
     live.push(child);
   }
@@ -541,8 +554,12 @@ async function buildManifestAsync(node, includeFiles, ctx) {
       }
     } else if (includeFiles && c.checked) {
       const f = { name: c.name, type: 'file' };
-      // 「汇总文件大小」开启且已知字节数时，把单个文件大小写入清单。
-      if (ctx.includeSizes && typeof c.size === 'number' && c.size > 0) f.size = c.size;
+      // 开启「汇总文件大小」且后端给出数值时，把两个数值都写入清单：
+      //   size       = 该文件的逻辑大小；
+      //   sizeOnDisk = 该文件的占用磁盘空间（后端在取不到占用时已按它的逻辑大小替代）。
+      // 后端取不到数值时不写字段（不写假 0）；0 字节文件的真实 0 会照常写入。
+      if (ctx.includeSizes && typeof c.size === 'number') f.size = c.size;
+      if (ctx.includeSizes && typeof c.sizeOnDisk === 'number') f.sizeOnDisk = c.sizeOnDisk;
       // 文件占位同样带「最后确认时间」：合并时同名文件的属性（如 size）也能按时间取新。
       if (ctx.scanAt) f.updatedAt = ctx.scanAt;
       children.push(f);
@@ -561,15 +578,22 @@ async function buildManifestAsync(node, includeFiles, ctx) {
   // 读取侧据此把该目录直接当底部节点，省去一次磁盘 /api/list 请求。
   if (node._leaf) out.leaf = true;
   if (merged.length) out.tags = merged;
-  // 目录汇总：该目录下所有文件（含子孙）的数量与总大小（字节）。
-  // 数据来自后端 /api/summary 的「一次性批量预取」：前端把被选中的目录作为根，后端对每个根
-  // 递归统计整棵子树，单次请求即返回 path -> {fileCount,totalSize} 的完整映射（含所有子孙目录）。
-  // 因此这里只做查表，前端绝不再逐目录发请求；后端已保证每个目录（含符号链接指向的）都有记录。
+  // 目录汇总：该目录「整棵物理子树」的两套数值 —— 与子目录/文件是否被单独勾选、是否单独出现在
+  // 清单里都无关。凡是列进清单的目录（含半选目录）都带上它们。
+  //   totalSize       = 子树里所有文件的逻辑大小之和；
+  //   totalSizeOnDisk = 子树里所有文件的占用磁盘空间之和（取不到占用的文件按其逻辑大小替代）。
+  // 数据来自后端 /api/summary 的批量预取：前端以「会进清单的目录」为扫描根，后端对每个根递归
+  // 统计整棵子树，返回 path -> {fileCount,totalSize,totalSizeOnDisk,partial?} 的完整映射；
+  // 因此这里只做查表，前端不再逐目录发请求。
   if (ctx.includeSizes && node.path) {
     const sum = getSummary(node.path); // 直查路径级缓存（含该目录整棵子树曾被一次性取回）
     if (sum) {
       out.fileCount = sum.fileCount;
       out.totalSize = sum.totalSize;
+      if (typeof sum.totalSizeOnDisk === 'number') out.totalSizeOnDisk = sum.totalSizeOnDisk;
+      // 下界标记：该子树里有读不到（超时/权限）或触到递归深度上限的部分时，数值只是下界。
+      // 透传到清单，读取侧据此知道这个大小不是精确值（也绝不把读不到伪装成 0）。
+      if (sum.partial) out.sizePartial = true;
       node._summary = sum; // 缓存到树节点，供树形视图展示目录大小
     }
   }
@@ -586,24 +610,27 @@ function clearSummaries(node) {
   for (const c of (node.children || [])) clearSummaries(c);
 }
 
-// 收集「需要扫描文件大小」的最小独立目录根：遍历整棵选择树，找出所有
-// checked / indeterminate 的目录节点，但**排除那些祖先（不含自身、不含虚拟根「此电脑」）
-// 已经 checked 的节点**——因为它们已被父目录整段覆盖，无需自成一根。
-// 返回的节点彼此不存在父子包含关系，后端对每个根递归扫描各自子树，绝不扫描未选中部分/整盘。
-function collectSummaryRoots(node, ancestorChecked) {
+// 收集「需要扫描文件大小」的最小独立目录根：遍历整棵选择树，找出所有 checked / indeterminate
+// 的目录节点，但**排除那些祖先（不含自身、不含虚拟根「此电脑」）已经是扫描根、因而已被整段覆盖
+// 的节点**——它们的子树会被祖先那一次扫描连带统计，无需自成一根。
+// 返回的节点彼此不存在父子包含关系，后端对每个根递归扫描各自子树。
+//
+// 为什么半选(indeterminate)也要成根：口径是「目录大小 = 该目录整棵物理子树的逻辑大小之和，
+// 与子目录/文件是否被单独勾选或展示无关」。半选目录同样会出现在清单里，因此它也必须带上覆盖
+// 整棵子树的大小——这只能靠把它本身作为扫描根扫一次；若只扫它内部被勾选的子孙，它自身的大小
+// 会缺失，或者只覆盖被选中的那一部分，与口径不符。
+// 代价：只选了大盘里少数目录时，该盘的盘根也会被整扫一次（结果按路径缓存，不会重复扫盘）。
+function collectSummaryRoots(node, ancestorCovered) {
   const result = [];
   const isRealDir = node.kind === 'dir' && node.path;
-  const checked = !!node.checked;
-  // 仅「整目录被勾选(checked)」的节点作为独立扫描根：它会被完整扫描整棵子树。
-  // 半选(indeterminate)不是扫描根——它只是部分后代被选中，真正的根落在更深的 checked 后代上，
-  // 那些根已在递归中返回；若把半选祖先也当根（如只选 C:\a\b 却扫整个 C:\），会误扫整块大盘。
-  if (isRealDir && checked && !ancestorChecked) result.push(node);
-  // 向下覆盖规则：只有本节点「真实目录且整目录勾选(checked)」时，其子树才被完整覆盖、子节点无需再独立成根。
-  // 半选(indeterminate)节点不向子节点传播「已覆盖」——子节点仍需各自判是否为根。
+  // 会进清单的目录节点：checked（整目录选中）或 indeterminate（半选，仅部分后代被选中）。
+  const covered = !!node.checked || !!node.indeterminate;
+  if (isRealDir && covered && !ancestorCovered) result.push(node);
+  // 向下覆盖规则：本节点已是扫描根时，其后代无需再独立成根（祖先那次扫描已覆盖它们）。
   // 虚拟根「此电脑」没有真实路径（isRealDir=false），checked 只是容器语义，不向下覆盖。
-  const childAncestorChecked = ancestorChecked || (isRealDir && checked);
+  const childAncestorCovered = ancestorCovered || (isRealDir && covered);
   for (const c of (node.children || [])) {
-    if (c.kind === 'dir') result.push(...collectSummaryRoots(c, childAncestorChecked));
+    if (c.kind === 'dir') result.push(...collectSummaryRoots(c, childAncestorCovered));
   }
   return result;
 }
@@ -613,7 +640,7 @@ function collectSummaryRoots(node, ancestorChecked) {
 // 因此「取消勾选/重选」导致扫描根集合变化时，已扫描过的子树仍命中本缓存，绝不会重复扫描整块父目录。
 // 永不自动过期：目录大小只在用户手动点某目录的「刷新」按钮、或点「重新生成」(summaryCache.clear()) 时更新；
 // 因此隔多久再访问同一目录都不会产生多余的 /api/summary 请求。at 仅用于显示「上次更新时间」。
-const summaryCache = new Map(); // path -> { fileCount, totalSize, at }
+const summaryCache = new Map(); // path -> { fileCount, totalSize, totalSizeOnDisk, partial?, at }，partial=true 表示数值只是下界
 
 // 从路径级缓存取某目录的汇总；命中即返回（永不自动过期，缺失返回 null）。后端曾把该目录连同其整棵
 // 子树一起返回并写入缓存，故直接查本缓存即可拿到「含子孙」的任意目录大小，无需重新请求后端。
@@ -628,36 +655,52 @@ function getSummary(path) {
 const dirCache = new Map(); // key(path + '#s'|'') -> { items, at }
 const DIR_CACHE_TTL = 5 * 60 * 1000; // 5 分钟
 
-// 一次性把「被选中的目录」里【尚未缓存/已过期】的根发给后端，单次请求取回它们各自子树
-// （含所有子孙目录）的大小映射；其余根直接复用路径级缓存（含其整棵子树），绝不重复扫描磁盘。
+// 汇总请求的分批参数：把缺失根分批发给后端（?path=A&path=B&…），每批独立超时、独立写缓存。
+// 为什么分批：把「半选盘根」也纳入扫描根之后（见 collectSummaryRoots），单次请求可能要扫很大
+// 的子树，而旧实现是整轮 all-or-nothing —— 一次超时就丢掉全部目录的大小。分批后某批失败只
+// 影响该批，已成功批次的数值照常进缓存并被清单采用，下一轮 regenerate 只重试缺失的根。
+const SUMMARY_BATCH_SIZE = 4;
+const SUMMARY_BATCH_TIMEOUT_MS = 180000; // 单批最长等待时间
+
+// 把「会进清单的目录」里【尚未缓存】的根分批发给后端，取回它们各自子树（含所有子孙目录）的
+// 大小映射；其余根直接复用路径级缓存（含其整棵子树），绝不重复扫描磁盘。
 // rootPaths：最小独立扫描根（已被 collectSummaryRoots 排除掉被祖先覆盖的目录，故彼此无包含关系）。
 async function fetchAllSummaries(rootPaths) {
   if (!rootPaths || !rootPaths.length) return;
   const uniq = [...new Set(rootPaths)];
-  const now = Date.now();
   // 只挑「路径级缓存缺失」的根（缓存永不自动过期，故只看在不在）；由于之前取某根时已将其整棵子树
   // 一并写入缓存，命中缓存的根意味着它和它所有子孙都已在缓存，无需再请求——取消勾选/重选都不会重扫父目录。
   const missing = uniq.filter(p => !summaryCache.has(p));
   if (missing.length === 0) return; // 全部命中缓存，后端零请求
-  setStatus('正在汇总选中目录的文件大小…');
-  // 把所有缺失根拼进同一个 /api/summary 请求（?path=A&path=B&…），后端对每个根递归统计整棵子树，
-  // 一次返回所有目录（含子孙）的大小，避免前端逐目录请求。
-  const q = missing.map(p => 'path=' + encodeURIComponent(p)).join('&');
-  // 前端超时兜底：整轮汇总最多等 3 分钟，超时/失败则放弃大小汇总（不附 fileCount/totalSize），
-  // 但绝不阻断清单生成——避免某块大盘扫描卡死导致整页预览永久不更新。
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 180000);
-  try {
-    const res = await fetch('/api/summary?' + q, { signal: ctrl.signal });
-    if (!res.ok) return;
-    const data = await res.json();
-    const sums = (data && data.summaries) || {};
-    // 把后端返回的每一个目录（含所有子孙）都写进路径级缓存，供本次及后续（扫描根变化后）直接复用。
-    for (const [k, v] of Object.entries(sums)) summaryCache.set(k, { fileCount: v.fileCount, totalSize: v.totalSize, at: now });
-  } catch (_) {
-    // 失败/超时：本次放弃大小汇总，但不写脏缓存；下次 regenerate 仍会重试缺失根。
-  } finally {
-    clearTimeout(timer);
+  const now = Date.now();
+  for (let i = 0; i < missing.length; i += SUMMARY_BATCH_SIZE) {
+    const batch = missing.slice(i, i + SUMMARY_BATCH_SIZE);
+    setStatus('正在汇总目录大小…（' + Math.min(i + batch.length, missing.length) + '/' + missing.length + '）');
+    const q = batch.map(p => 'path=' + encodeURIComponent(p)).join('&');
+    // 前端超时兜底：单批最多等 3 分钟；超时/失败只放弃该批（不写脏缓存），绝不阻断清单生成，
+    // 也不会连带丢掉其他批已取回的大小。
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), SUMMARY_BATCH_TIMEOUT_MS);
+    try {
+      const res = await fetch('/api/summary?' + q, { signal: ctrl.signal });
+      if (!res.ok) continue;
+      const data = await res.json();
+      const sums = (data && data.summaries) || {};
+      // 把后端返回的每一个目录（含所有子孙）都写进路径级缓存，供本次及后续（扫描根变化后）直接复用。
+      for (const [k, v] of Object.entries(sums)) {
+        summaryCache.set(k, {
+          fileCount: v.fileCount,
+          totalSize: v.totalSize,
+          totalSizeOnDisk: v.totalSizeOnDisk,
+          partial: !!v.partial,
+          at: now,
+        });
+      }
+    } catch (_) {
+      // 本批失败/超时：不写脏缓存；其他批不受影响，下次 regenerate 仍会重试本批缺失根。
+    } finally {
+      clearTimeout(timer);
+    }
   }
 }
 
@@ -676,11 +719,22 @@ async function refreshSummary(node) {
     const data = await res.json();
     const sums = (data && data.summaries) || {};
     const now = Date.now();
-    // 把返回的每一个目录（含子孙）写进路径级缓存；已存在则覆盖为最新值。
-    for (const [k, v] of Object.entries(sums)) summaryCache.set(k, { fileCount: v.fileCount, totalSize: v.totalSize, at: now });
+    // 把返回的每一个目录（含子孙）写进路径级缓存；已存在则覆盖为最新值（含下界标记）。
+    for (const [k, v] of Object.entries(sums)) {
+      summaryCache.set(k, {
+        fileCount: v.fileCount,
+        totalSize: v.totalSize,
+        totalSizeOnDisk: v.totalSizeOnDisk,
+        partial: !!v.partial,
+        at: now,
+      });
+    }
     regenerate(); // 重渲染树徽标 + 刷新预览清单（缓存已是最新，不会产生新的网络请求）
     const s = summaryCache.get(node.path);
-    setStatus('已刷新 ' + node.path + ' 的大小' + (s ? ('（' + formatCount(s.fileCount) + ' 项 · ' + formatSize(s.totalSize) + '）') : ''));
+    setStatus('已刷新 ' + node.path + ' 的大小'
+      + (s ? ('（' + (s.partial ? '≥ ' : '') + formatCount(s.fileCount) + ' 项 · 大小 ' + formatSize(s.totalSize)
+        + (typeof s.totalSizeOnDisk === 'number' ? ' · 占用 ' + formatSize(s.totalSizeOnDisk) : '') + '）') : '')
+      + (s && s.partial ? '；该数值为下界（子树里有读不到或超出深度上限的部分）' : ''));
   } catch (e) {
     setStatus('刷新失败：' + (e && e.message ? e.message : e));
   } finally {
@@ -728,17 +782,19 @@ async function generateManifest(genAt) {
   // 语义是「该目录/文件最后一次被扫描确认存在的时间」，多分片合并时按它取新。
   const ctx = { includeFiles, includeSizes, scanAt: Date.now() };
   // 仅当开启了「汇总文件数与大小」时，才去后端拿文件数与总大小。
-  // 关键优化：只把「被选中的目录」作为扫描根传给 /api/summary，后端只递归统计这些子树，
-  // 绝不扫描整块盘；且前端只发一次请求（所有根一起带过去），后端递归返回每棵子树全部目录的大小，
-  // 前端不再逐目录请求。通过 summaryCache 走内存缓存（按根集合，TTL 2 分钟）。
+  // 口径：目录大小 = 该目录整棵物理子树里所有文件的逻辑大小之和，与子目录/文件是否被单独勾选、
+  // 是否单独出现在清单里都无关；因此扫描根取「会进清单的目录（勾选或半选）的最小独立子集」——
+  // 半选目录也要自己成根，才能带上覆盖整棵子树的大小（细则见 collectSummaryRoots 与格式文档）。
+  // 前端把根分批交给 /api/summary，后端递归返回每棵子树全部目录的大小，前端不逐目录请求；
+  // 结果按路径进 summaryCache（本会话内不自动过期，只有「重新生成」或手动刷新才更新）。
   // 先清空旧的大小缓存（节点上的 _summary）：仅「当前在索引里」的目录会在下方遍历时重新挂上
   // _summary，取消勾选（或祖先被取消）的目录不再被遍历，从而树里只显示已加入索引目录的大小。
   if (state.root) clearSummaries(state.root);
   // 先对用到的盘惰性写入稳定身份标记（异步，不阻塞；失败回退序列号）。
   await ensureDriveVolumeIds();
   if (includeSizes && state.root) {
-    const roots = collectSummaryRoots(state.root); // 最小独立扫描根（排除被祖先选中的）
-    // 把「尚未缓存/过期」的根批量发给后端；已缓存（含各自整棵子树）的根直接命中 summaryCache，
+    const roots = collectSummaryRoots(state.root); // 会进清单目录的最小独立扫描根（勾选或半选）
+    // 把「尚未缓存」的根分批发给后端；已缓存（含各自整棵子树）的根直接命中 summaryCache，
     // 取消勾选/重选导致根集合变化时也不会重复扫描父目录。
     await fetchAllSummaries(roots.map(r => r.path));
   }
@@ -1202,6 +1258,14 @@ function sortManifestChildren(children) {
 
 // 合并两棵子树 / 两份卷文件。ctx: { aPart, bPart, aStamp, bStamp }（首次调用传文件级 part 与时间）。
 function mergeVolumeTrees(a, b, ctx) {
+  // 顶层调用（未标记）：先按替代规则补齐两侧缺失的「占用磁盘空间」值。
+  // 「取不到占用就用逻辑大小替代」是规定行为；入口统一补齐后，递归与「max(各来源值, 子项之和)」
+  // 都在同一口径下进行，也让同一组输入重复合并得到完全一致的结果（幂等）。
+  if (!ctx || !ctx._diskFilled) {
+    fillDiskValuesDeep(a);
+    fillDiskValuesDeep(b);
+    ctx = Object.assign({}, ctx || {}, { _diskFilled: true });
+  }
   ctx = ctx || {};
   const aPart = ctx.aPart || '';
   const bPart = ctx.bPart || '';
@@ -1224,7 +1288,7 @@ function mergeVolumeTrees(a, b, ctx) {
     const prev = map.get(key);
     map.set(key, {
       node: mergeVolumeTrees(prev.node, child, {
-        aPart: prev.part, bPart: sidePart, aStamp: prev.stamp, bStamp: sideStamp,
+        aPart: prev.part, bPart: sidePart, aStamp: prev.stamp, bStamp: sideStamp, _diskFilled: true,
       }),
       // 归并后的 part 取字典序较大者、时间取较新者，保证后续再合并时判定仍确定。
       part: (prev.part || '') > (sidePart || '') ? prev.part : sidePart,
@@ -1259,7 +1323,74 @@ function mergeVolumeTrees(a, b, ctx) {
   if (stamp != null) out.updatedAt = stamp; else delete out.updatedAt;
   if (out.part && aPart !== bPart) delete out.part;
 
+  // 6) 两套大小字段都与合并结果保持一致。children 是并集，而两侧的 fileCount / totalSize /
+  //    totalSizeOnDisk 各自只覆盖「自己那台机器上的整棵子树」，直接沿用较新一方会出现
+  //    「父目录小于清单里可见子项之和」这种无从解释的结果。规则：每个数值分别取
+  //    「两侧已有的整棵子树值」与「合并后子项之和」中的较大者——既不会把两台机器对同一份内容的
+  //    统计相加造成虚高，也不会自相矛盾；任一侧或任一子项只是下界（sizePartial）时，结果同样标记。
+  if ((out.type || 'folder') === 'folder') {
+    const sum = sumChildrenTotals(children);
+    const aCount = (typeof a.fileCount === 'number') ? a.fileCount : 0;
+    const bCount = (typeof b.fileCount === 'number') ? b.fileCount : 0;
+    const aSize = (typeof a.totalSize === 'number') ? a.totalSize : 0;
+    const bSize = (typeof b.totalSize === 'number') ? b.totalSize : 0;
+    const aDisk = (typeof a.totalSizeOnDisk === 'number') ? a.totalSizeOnDisk
+      : (typeof a.totalSize === 'number' ? a.totalSize : 0); // 缺占用值 → 按替代规则用逻辑大小顶上
+    const bDisk = (typeof b.totalSizeOnDisk === 'number') ? b.totalSizeOnDisk
+      : (typeof b.totalSize === 'number' ? b.totalSize : 0);
+    const hasAny = !!(aCount || bCount || aSize || bSize || aDisk || bDisk
+      || sum.fileCount || sum.totalSize || sum.totalSizeOnDisk);
+    if (hasAny) {
+      out.fileCount = Math.max(aCount, bCount, sum.fileCount);
+      out.totalSize = Math.max(aSize, bSize, sum.totalSize);
+      out.totalSizeOnDisk = Math.max(aDisk, bDisk, sum.totalSizeOnDisk);
+      if (a.sizePartial || b.sizePartial || sum.partial) out.sizePartial = true;
+      else delete out.sizePartial;
+    }
+  }
+
   return out;
+}
+
+// 按替代规则补齐「占用磁盘空间」值：缺失时用对应的逻辑大小顶上（已有真实占用值时不覆盖）。
+// 递归整棵子树——合并入口调用一次，使合并口径统一，并保证同一组输入重复合并结果完全一致。
+function fillDiskValuesDeep(node) {
+  if (!node || typeof node !== 'object') return;
+  if ((node.type || 'folder') === 'file') {
+    if (typeof node.sizeOnDisk !== 'number' && typeof node.size === 'number') node.sizeOnDisk = node.size;
+    return;
+  }
+  if (typeof node.totalSizeOnDisk !== 'number' && typeof node.totalSize === 'number') {
+    node.totalSizeOnDisk = node.totalSize;
+  }
+  for (const c of (Array.isArray(node.children) ? node.children : [])) fillDiskValuesDeep(c);
+}
+
+// 合并后「子项之和」：子目录取 fileCount / totalSize / totalSizeOnDisk，文件占位取 size / sizeOnDisk。
+// 任一项缺数值或本身是下界，都不影响「取较大者」的用法，但会通过 partial 让上层知道结果只是下界。
+function sumChildrenTotals(children) {
+  let fileCount = 0, totalSize = 0, totalSizeOnDisk = 0, partial = false;
+  for (const c of (children || [])) {
+    if ((c.type || 'folder') === 'file') {
+      fileCount += 1;
+      if (typeof c.size === 'number') totalSize += c.size;
+      else partial = true;
+      // 占用值缺失（早先没有该字段的清单）时按同一替代规则用逻辑大小顶上。
+      if (typeof c.sizeOnDisk === 'number') totalSizeOnDisk += c.sizeOnDisk;
+      else if (typeof c.size === 'number') totalSizeOnDisk += c.size;
+      else partial = true;
+    } else {
+      if (typeof c.fileCount === 'number') fileCount += c.fileCount;
+      else partial = true;
+      if (typeof c.totalSize === 'number') totalSize += c.totalSize;
+      else partial = true;
+      if (typeof c.totalSizeOnDisk === 'number') totalSizeOnDisk += c.totalSizeOnDisk;
+      else if (typeof c.totalSize === 'number') totalSizeOnDisk += c.totalSize;
+      else partial = true;
+    }
+    if (c.sizePartial) partial = true;
+  }
+  return { fileCount, totalSize, totalSizeOnDisk, partial };
 }
 
 // 分片标识：默认用本机 ID（主机名）——一块盘在一台机器上的一份选择即一份分片；

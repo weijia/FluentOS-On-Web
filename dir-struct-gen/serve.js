@@ -341,16 +341,21 @@ async function listDir(p, withSizes) {
       );
     } else {
       // 文件项：默认只给文件名；仅当 withSizes 为真（前端「包含文件 + 汇总」同时开启）
-      // 才逐个 stat 取字节数，避免拖慢日常浏览。某些 Node 版本的 Dirent 不带 size，故用 stat 兜底。
+      // 才逐个 stat 取数值，避免拖慢日常浏览。某些 Node 版本的 Dirent 不带 size，故用 stat 兜底。
       const it = { name: e.name, kind: 'file' };
       items.push(it);
       fileEntries.push(it);
     }
   }
   if (withSizes) {
+    // 同时给出「逻辑大小」与「占用磁盘空间」两个数值；占用取不到（如 Windows 无 st_blocks）时
+    // 用该文件的逻辑大小替代，保证两个字段都可用。stat 失败则两个字段都缺省——不写假 0。
     await Promise.all(fileEntries.map(async (it) => {
-      try { it.size = (await fs.promises.stat(path.join(p, it.name))).size || 0; }
-      catch (_) { it.size = 0; }
+      try {
+        const pair = sizePairOf(await fs.promises.stat(path.join(p, it.name)));
+        it.size = pair.size;
+        it.sizeOnDisk = pair.sizeOnDisk;
+      } catch (_) { /* stat 失败：两个字段都缺省，前端据此不把它当精确值 */ }
     }));
   }
   await Promise.all(jobs);
@@ -388,7 +393,17 @@ async function buildTree(p, visited, depth, withFiles) {
         }
       })());
     } else if (withFiles) {
-      node.children.push({ name: it.name, kind: 'file' });
+      // 文件节点：同时带「逻辑大小」与「占用磁盘空间」（占用取不到时用逻辑大小替代）。
+      // 用 job 并行取，避免逐个串行拖慢整棵树；取不到则两个字段都缺省，不写假 0。
+      jobs.push((async () => {
+        const child = { name: it.name, kind: 'file' };
+        try {
+          const pair = sizePairOf(await statForSummary(path.join(p, it.name)));
+          child.size = pair.size;
+          child.sizeOnDisk = pair.sizeOnDisk;
+        } catch (_) { /* 取不到数值：两个字段都缺省 */ }
+        node.children.push(child);
+      })());
     }
   }
   await Promise.all(jobs);
@@ -401,6 +416,52 @@ async function buildTree(p, visited, depth, withFiles) {
   return node;
 }
 
+// 目录大小统计的读取参数与容错策略。
+// 历史缺陷：readdir 一次 4 秒超时就把整棵子树记成 {fileCount:0,totalSize:0}，慢盘或海量小文件的
+// 目录会静默变成 0，父目录随之偏小。现在改为「按更长超时重试」，仍读不到才标记不完整。
+const SUMMARY_READDIR_TIMEOUT_MS = 20000;
+const SUMMARY_READDIR_RETRY = 2;   // 超时后的额外重试次数（最多 1 + 2 次尝试）
+const SUMMARY_STAT_TIMEOUT_MS = 10000;
+const SUMMARY_MAX_DEPTH = 512;     // 递归深度上限：超过即标记不完整，不再返回 0 冒充真实值
+
+// 「占用磁盘空间」的取值口径。
+// POSIX 下 stat 的 st_blocks 是「512 字节块」的数量（与 blksize 无关），乘 512 即实际分配字节；
+// 取不到时返回 null，由调用方按「用该文件的逻辑大小替代」处理（Windows 下 Node/libuv 不提供
+// st_blocks；簇对齐、压缩、稀疏、去重、云占位等也会让占用量与逻辑大小不同，属正常）。
+const ALLOC_BLOCK_UNIT = 512;
+function allocBytesOf(st) {
+  if (process.platform === 'win32') return null;
+  if (st && typeof st.blocks === 'number' && isFinite(st.blocks) && st.blocks >= 0) {
+    return st.blocks * ALLOC_BLOCK_UNIT;
+  }
+  return null;
+}
+
+// 把 stat 结果规整成清单要的两个数值：逻辑大小与占用磁盘空间（占用取不到 → 用逻辑大小替代）。
+function sizePairOf(st) {
+  const size = st && typeof st.size === 'number' ? st.size : 0;
+  const alloc = allocBytesOf(st);
+  return { size, sizeOnDisk: alloc == null ? size : alloc };
+}
+
+// 读取目录项；只在「超时」时重试（权限错误、路径不存在等重试无意义，直接判定读不到）。
+// 返回 dirents 数组，或 null 表示确实读不到（调用方必须标记不完整，不得记 0）。
+async function readdirForSummary(p) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await withTimeout(fs.promises.readdir(p, { withFileTypes: true }), SUMMARY_READDIR_TIMEOUT_MS);
+    } catch (err) {
+      const isTimeout = !!(err && err.message === 'timeout');
+      if (!isTimeout || attempt >= SUMMARY_READDIR_RETRY) return null;
+    }
+  }
+}
+
+// 取单个文件/链接的状态（带超时，避免单个卡死的文件把整棵子树的统计拖住）。
+async function statForSummary(p) {
+  return withTimeout(fs.promises.stat(p), SUMMARY_STAT_TIMEOUT_MS);
+}
+
 // 递归统计某目录下「全部文件（含子孙）」的数量与总大小（字节）。
 // 一次性遍历整棵子树，把所有目录的绝对路径 → {fileCount, totalSize} 写进 acc，
 // 前端只需对每块盘根调用一次，即可拿到其下每个目录的汇总，避免按选中目录逐个重复扫描。
@@ -408,8 +469,13 @@ async function buildTree(p, visited, depth, withFiles) {
 // realpathSums：跨根共享的「真实路径 -> 聚合对象」表。遇到符号链接 / junction 指向同一物理
 // 目录时，直接复用其聚合对象（原地更新）并以「原始路径」为键写入 acc，既不重复扫描磁盘，
 // 也保证前端树里每个节点（含链接、含指向正在统计中的祖先的链接）都能查到大小，不再漏记。
+//
+// 完整性口径（重要）：
+//   - 目录大小 = 该目录整棵物理子树里所有文件的逻辑大小之和，与「是否被单独勾选 / 单独展示」无关。
+//   - 读不到（超时重试后仍失败、权限不足）或触到递归深度上限时，**绝不把该子树记成 0**：
+//     返回已统计到的部分作为下界，并打上 partial 标记，由父目录逐层向上传播；
+//     前端与读取侧据此知道该数值只是下界（见 dir-struct-manifest-format.md）。
 async function summarizeTree(p, visited, depth, acc, realpathSums) {
-  if (depth > 200) { if (acc && p) acc.set(p, { fileCount: 0, totalSize: 0 }); return { fileCount: 0, totalSize: 0 }; }
   let rp;
   try { rp = await fs.promises.realpath(p); } catch (_) { rp = p; }
   // 真实路径已被统计过（或正在统计中）：复用同一个聚合对象（引用共享，算完原地更新），
@@ -419,20 +485,33 @@ async function summarizeTree(p, visited, depth, acc, realpathSums) {
     if (acc && p) acc.set(p, existing);
     return existing;
   }
-  if (visited.has(rp)) { if (acc && p) acc.set(p, { fileCount: 0, totalSize: 0 }); return { fileCount: 0, totalSize: 0 }; }
+  if (visited.has(rp)) {
+    if (acc && p) acc.set(p, { fileCount: 0, totalSize: 0, totalSizeOnDisk: 0 });
+    return { fileCount: 0, totalSize: 0, totalSizeOnDisk: 0 };
+  }
   visited.add(rp);
   // 先放占位对象并登记到 realpathSums：这样指向本目录的 junction / 祖先自引用可复用同一个对象，
   // 待下方算完后原地更新其值（引用共享），无需重复扫盘也不漏记，且无环。
-  const summary = { fileCount: 0, totalSize: 0 };
+  // 两个数值：totalSize = 逻辑大小之和；totalSizeOnDisk = 占用磁盘空间之和
+  // （某个文件取不到占用量时，用它的逻辑大小替代）。
+  const summary = { fileCount: 0, totalSize: 0, totalSizeOnDisk: 0 };
   if (realpathSums) realpathSums.set(rp, summary);
-  let dirents;
-  try {
-    dirents = await withTimeout(fs.promises.readdir(p, { withFileTypes: true }), 4000);
-  } catch (_) {
+  // 深度超限：不再返回 0 冒充真实值（否则父目录会凭空偏小），标记不完整后向上传播。
+  if (depth > SUMMARY_MAX_DEPTH) {
+    summary.partial = true;
+    if (acc && p) acc.set(p, summary);
     visited.delete(rp);
-    return summary; // 占位对象已含 0/0，acc 也已通过 realpathSums 关联
+    return summary;
   }
-  let fileCount = 0, totalSize = 0;
+  const dirents = await readdirForSummary(p);
+  if (!dirents) {
+    // 读不到（超时重试后仍失败 / 权限不足等）：保留已统计到的下界并标记不完整，绝不静默记 0。
+    summary.partial = true;
+    if (acc && p) acc.set(p, summary);
+    visited.delete(rp);
+    return summary;
+  }
+  let fileCount = 0, totalSize = 0, totalSizeOnDisk = 0, partial = false;
   const dirJobs = [];
   const fileSizeJobs = [];
   for (const e of dirents) {
@@ -443,26 +522,49 @@ async function summarizeTree(p, visited, depth, acc, realpathSums) {
       // 符号链接：先判定是否指向目录，再决定是否下钻（避免对文件链接误判）。
       dirJobs.push((async () => {
         try {
-          if ((await fs.promises.stat(path.join(p, e.name))).isDirectory()) {
+          if ((await statForSummary(path.join(p, e.name))).isDirectory()) {
             return summarizeTree(path.join(p, e.name), visited, depth + 1, acc, realpathSums);
           }
-        } catch (_) { /* 不可达，按 0 处理 */ }
-        return { fileCount: 0, totalSize: 0 };
+          return { fileCount: 0, totalSize: 0, totalSizeOnDisk: 0 };
+        } catch (_) {
+          // 链接不可达：不当作 0，标记不完整
+          return { fileCount: 0, totalSize: 0, totalSizeOnDisk: 0, partial: true };
+        }
       })());
     } else {
       fileCount += 1;
-      if (typeof e.size === 'number') totalSize += e.size;
-      else fileSizeJobs.push((async () => {
-        try { return (await fs.promises.stat(path.join(p, e.name))).size || 0; } catch (_) { return 0; }
-      })());
+      // 说明：readdir 返回的 Dirent 只有 name/type，没有 size，所以这里实际都走 stat 取数值。
+      // 一次 stat 同时取「逻辑大小」与「占用磁盘空间」（占用取不到 → 用逻辑大小替代）。
+      if (typeof e.size === 'number') {
+        totalSize += e.size;
+        totalSizeOnDisk += e.size; // 没有 stat 结果时按逻辑大小替代
+      } else {
+        fileSizeJobs.push((async () => {
+          try { return sizePairOf(await statForSummary(path.join(p, e.name))); }
+          catch (_) { return { unknown: true }; } // 取不到数值：不按 0 计入，标记下界
+        })());
+      }
     }
   }
   const [subs, extraSizes] = await Promise.all([Promise.all(dirJobs), Promise.all(fileSizeJobs)]);
-  for (const s of subs) { fileCount += s.fileCount; totalSize += s.totalSize; }
-  for (const s of extraSizes) totalSize += s;
+  for (const s of subs) {
+    fileCount += s.fileCount;
+    totalSize += s.totalSize;
+    totalSizeOnDisk += (typeof s.totalSizeOnDisk === 'number' ? s.totalSizeOnDisk : s.totalSize);
+    if (s.partial) partial = true; // 子树里有一处不完整 → 本目录的总量同样只是下界
+  }
+  for (const s of extraSizes) {
+    if (s && typeof s === 'object' && s.unknown) partial = true;
+    else {
+      totalSize += s.size;
+      totalSizeOnDisk += s.sizeOnDisk;
+    }
+  }
   // 原地更新占位对象（所有复用方通过引用同步拿到最终值），并按原始路径记录。
   summary.fileCount = fileCount;
   summary.totalSize = totalSize;
+  summary.totalSizeOnDisk = totalSizeOnDisk;
+  if (partial) summary.partial = true; else delete summary.partial;
   if (acc && p) acc.set(p, summary);
   visited.delete(rp);
   return summary;
