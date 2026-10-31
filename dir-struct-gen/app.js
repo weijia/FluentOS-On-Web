@@ -4,6 +4,11 @@
  * 数据源：本地 Node 服务提供的 /api/drives 与 /api/list（服务器端读取真实文件系统，
  *        无需浏览器文件选择器，Firefox / Safari 也可用）。
  * 目录采用懒加载：点开某层才向服务器请求下一层。
+ *
+ * v2 拆分（主机索引 + 卷文件）：同一块盘（volume）允许存在多份目录结构文件——
+ * 每台主机各写一份「分片」`<volumeKey>.<partId>.json`（内容带 part{id,revision,generatedAt}），
+ * 互不覆盖；读取时按 volumeId 归组、按确定性规则合并（见 mergeVolumeTrees）。
+ * 节点级 updatedAt 为毫秒级 Unix epoch，供合并时「按时间取新」判定。
  */
 
 const $ = (id) => document.getElementById(id);
@@ -11,7 +16,9 @@ const $ = (id) => document.getElementById(id);
 const state = {
   root: null,       // 此电脑 虚拟根节点（始终存在）
   computerId: null, // 本机 ID（主机名），用于清单根与 RS 文件名默认值
-  previewFiles: [], // 当前预览的 v2 拆分文件列表 [{name, content, isHost}]，与上传到 RS 的内容一致
+  previewFiles: [], // 当前预览的 v2 拆分文件列表 [{name, content, isHost, partId}]，与上传到 RS 的内容一致
+  shardIndex: {},   // 卷索引键 -> 已知分片基名数组（来自远端列举 / 加载到的 mounts.files），
+                    // 供预览与主机索引的 mounts.files 列出同一卷的全部分片
 };
 
 const dom = {
@@ -536,12 +543,17 @@ async function buildManifestAsync(node, includeFiles, ctx) {
       const f = { name: c.name, type: 'file' };
       // 「汇总文件大小」开启且已知字节数时，把单个文件大小写入清单。
       if (ctx.includeSizes && typeof c.size === 'number' && c.size > 0) f.size = c.size;
+      // 文件占位同样带「最后确认时间」：合并时同名文件的属性（如 size）也能按时间取新。
+      if (ctx.scanAt) f.updatedAt = ctx.scanAt;
       children.push(f);
     }
   }
   // 标签（自动 + 手动，去重）合并进清单，便于读取侧按标签筛选/展示。
   const merged = [...new Set([...(node.tags || []), ...(node.manualTags || [])])];
   const out = { name: node.name, type: 'folder', children };
+  // 节点级「最后确认时间」：毫秒级 Unix epoch，供多分片合并时按时间取新；
+  // 缺失该字段的旧文件由读取侧按 ISO 字符串兼容（见 toEpochMs）。
+  if (ctx.scanAt) out.updatedAt = ctx.scanAt;
   // 驱动层节点带稳定 volumeId（来自磁盘根 .dir-struct-id），供读取侧去重 / 命名深挖标记；
   // 子目录不重复携带，靠祖先驱动节点溯源即可。
   if (node.volumeId) out.volumeId = node.volumeId;
@@ -712,7 +724,9 @@ async function ensureDriveVolumeIds() {
 async function generateManifest(genAt) {
   const includeFiles = dom.optFiles.checked;
   const includeSizes = dom.optSize.checked;
-  const ctx = { includeFiles, includeSizes };
+  // scanAt：本次扫描的确认时间（毫秒级 epoch），写入每个节点的 updatedAt——
+  // 语义是「该目录/文件最后一次被扫描确认存在的时间」，多分片合并时按它取新。
+  const ctx = { includeFiles, includeSizes, scanAt: Date.now() };
   // 仅当开启了「汇总文件数与大小」时，才去后端拿文件数与总大小。
   // 关键优化：只把「被选中的目录」作为扫描根传给 /api/summary，后端只递归统计这些子树，
   // 绝不扫描整块盘；且前端只发一次请求（所有根一起带过去），后端递归返回每棵子树全部目录的大小，
@@ -768,7 +782,12 @@ async function doRegenerate(genAt) {
   } else {
     state.previewFiles = [
       { name: payload.hostIndex.name, content: JSON.stringify(payload.hostIndex.json, null, 2), isHost: true },
-      ...payload.volumes.map((v) => ({ name: v.name, content: JSON.stringify(v.json, null, 2), isHost: false })),
+      ...payload.volumes.map((v) => ({
+        name: v.name,
+        content: JSON.stringify(v.json, null, 2),
+        isHost: false,
+        partId: (v.json.part && v.json.part.id) || '',
+      })),
     ];
   }
   renderPreview();
@@ -776,12 +795,44 @@ async function doRegenerate(genAt) {
 }
 
 // 由完整 manifest(version:1) 构建 v2 拆分的「上传载荷」——预览与上传共用同一份，确保两者一致。
-// 返回 { hostIndex: {name, json}, volumes: [{name, json}] }。
+// 每块盘写一份本机分片 <volumeKey>.<partId>.json（不再读改写别人的同名文件），主机索引的
+// mounts 同时携带 file（主文件，兼容尚未支持 files 的读取侧）与 files（同一卷的全部分片）。
+// 返回 { hostIndex: {name, json}, volumes: [{key, base, name, json}] }。
 function buildV2Payload(manifest, file) {
   const drives = (manifest.root.children || []).filter((d) => d.type === 'folder');
-  const mounts = drives.map((d) => {
-    const vkey = volumeKeyFor(d);
-    return { letter: d.name, volumeId: d.volumeId || null, file: sanitizeKey(vkey) };
+  const partId = partIdFor();
+  const mounts = [];
+  const volumes = drives.map((d) => {
+    const indexKey = volumeKeyFor(d);              // 卷索引键（原始，未脱敏）
+    const volumeKey = sanitizeKey(indexKey);       // RemoteStorage 文件名安全键
+    const ownBase = shardBaseName(volumeKey, partId);
+    const bases = volumeShardBases(indexKey, ownBase);
+    // 主文件：优先旧版单文件 <volumeKey>.json（若远端还有），否则取字典序第一份分片——
+    // file 的语义与旧版一致（一个不带 .json 的基名），供旧读取侧兜底。
+    const primary = bases.indexOf(volumeKey) >= 0 ? volumeKey : bases[0];
+    mounts.push({
+      letter: d.name,
+      volumeId: d.volumeId || null,
+      file: primary,
+      files: bases.map((b) => ({
+        file: b,
+        partId: b === volumeKey ? null : b.slice(volumeKey.length + 1),
+      })),
+    });
+    const json = {
+      volumeId: d.volumeId || null,
+      name: d.name,
+      type: 'folder',
+      // part：本分片的身份（id 默认本机主机名）、版本号（每次成功上传 +1）与生成时间（毫秒 epoch）。
+      part: {
+        id: partId,
+        revision: revisionFor(revisionKey(volumeKey, partId)),
+        generatedAt: Date.now(),
+      },
+      children: d.children,
+      sources: [manifest.source],
+    };
+    return { key: indexKey, base: ownBase, name: ownBase + '.json', json };
   });
   const hostIndex = {
     version: 2,
@@ -790,18 +841,6 @@ function buildV2Payload(manifest, file) {
     generator: manifest.generator,
     mounts,
   };
-  const volumes = drives.map((d) => {
-    const vkey = volumeKeyFor(d);
-    const fname = sanitizeKey(vkey);
-    const json = {
-      volumeId: d.volumeId || null,
-      name: d.name,
-      type: 'folder',
-      children: d.children,
-      sources: [manifest.source],
-    };
-    return { key: vkey, name: fname + '.json', json };
-  });
   const hostName = (file.endsWith('.json') ? file : file + '.json');
   return { hostIndex: { name: sanitizeKey(hostName), json: hostIndex }, volumes };
 }
@@ -824,7 +863,9 @@ function renderPreview() {
     head.className = 'preview-card-head';
     const title = document.createElement('span');
     title.className = 'preview-card-title';
-    title.textContent = f.name + (f.isHost ? '（主机索引 · v2）' : '（卷文件 · v2）');
+    title.textContent = f.name + (f.isHost
+      ? '（主机索引 · v2）'
+      : '（卷文件分片 · v2' + (f.partId ? ' · ' + f.partId : '') + '）');
     const spacer = document.createElement('span');
     spacer.className = 'spacer';
     const copyBtn = document.createElement('button');
@@ -1096,17 +1137,224 @@ async function applyDeepenMarks(clear = true) {
   return { total, warns };
 }
 
-// 按 name 并集合并两棵卷子树（不同主机对同一块盘的选择累加）。
-function mergeVolumeTrees(existing, incoming) {
-  const exChildren = Array.isArray(existing.children) ? existing.children : [];
-  const inChildren = Array.isArray(incoming.children) ? incoming.children : [];
-  const map = new Map();
-  for (const c of exChildren) map.set(c.name, c);
-  for (const c of inChildren) {
-    if (map.has(c.name)) map.set(c.name, mergeVolumeTrees(map.get(c.name), c));
-    else map.set(c.name, c);
+/* ---------------- v2 分片：命名、发现与合并 ----------------
+ * 同一块盘（volume）允许存在多份目录结构文件：每台主机写自己的一份「分片」
+ * （<volumeKey>.<partId>.json，内容带 part{id,revision,generatedAt}），互不覆盖，
+ * 读取时按 volumeId 归组后合并成一棵树。
+ * 合并规则（确定性、幂等）：
+ *   1) children 永远取并集——某台机没扫到不代表目录不存在，绝不因为「另一份更新」而抹掉别人的目录；
+ *   2) 同名节点的属性按「最后确认时间」取新：节点 updatedAt 优先，回退所属文件的 part.generatedAt /
+ *      generatedAt（时间字段兼容旧的 ISO 字符串写法）；
+ *   3) tags / sources 取并集去重（累积信息，不该被时间覆盖）；
+ *   4) leaf 重算：合并后有子目录就不再是底部节点（否则读取侧不显示展开按钮，深挖出的层会被藏住）；
+ *   5) 同名类型冲突（folder vs file）：folder 优先，不看时间（file 只是占位、不读内容）；
+ *   6) 时间缺失、或两侧时间相差不超过 MERGE_TIME_TOLERANCE_MS → 按 part.id 字典序取大者兜底，
+ *      保证同一组输入永远得到同一棵树（便于 diff / 缓存）。
+ */
+
+// 判定「同一时刻」的容差：两侧时间差不超过该值即视为同时，改用 part.id 兜底——多机时钟未必同步。
+const MERGE_TIME_TOLERANCE_MS = 5 * 60 * 1000;
+
+// 把时间戳统一成毫秒 epoch：数字直接采信；字符串按 ISO 解析（兼容早先写入的 ISO 字符串）；
+// 其它或缺失返回 null，由合并规则走 part.id 兜底。
+function toEpochMs(v) {
+  if (typeof v === 'number' && isFinite(v)) return v;
+  if (typeof v === 'string' && v) {
+    const t = Date.parse(v);
+    return isNaN(t) ? null : t;
   }
-  return { ...existing, children: [...map.values()] };
+  return null;
+}
+
+// 取两者中较新的时间戳（缺失视为未知，不参与比较）。
+function maxStamp(x, y) {
+  if (x == null) return y == null ? null : y;
+  if (y == null) return x;
+  return Math.max(x, y);
+}
+
+// 节点的「最后确认时间」：优先节点自身的 updatedAt，其次所属文件的时间。
+function nodeStamp(node, fileStamp) {
+  const own = toEpochMs(node && node.updatedAt);
+  return own != null ? own : toEpochMs(fileStamp);
+}
+
+// 冲突归属：时间较新者胜；时间缺失或相差在容差内 → 按 part.id 字典序取大者（确定性兜底）。
+function pickNewerSide(aStamp, bStamp, aPart, bPart) {
+  const a = toEpochMs(aStamp), b = toEpochMs(bStamp);
+  if (a != null && b != null && Math.abs(a - b) > MERGE_TIME_TOLERANCE_MS) return a > b ? 'a' : 'b';
+  const pa = aPart || '', pb = bPart || '';
+  if (pa === pb) return 'a'; // 同一分片自比（幂等）
+  return pa > pb ? 'a' : 'b';
+}
+
+// 清单 children 的确定性排序：目录优先 + 名称数字感知，与树形视图 sortChildren 同一口径。
+function sortManifestChildren(children) {
+  children.sort((x, y) => {
+    const xf = (x.type || 'folder') === 'folder';
+    const yf = (y.type || 'folder') === 'folder';
+    if (xf !== yf) return xf ? -1 : 1;
+    return String(x.name).localeCompare(String(y.name), undefined, { numeric: true });
+  });
+  for (const c of children) if (Array.isArray(c.children)) sortManifestChildren(c.children);
+  return children;
+}
+
+// 合并两棵子树 / 两份卷文件。ctx: { aPart, bPart, aStamp, bStamp }（首次调用传文件级 part 与时间）。
+function mergeVolumeTrees(a, b, ctx) {
+  ctx = ctx || {};
+  const aPart = ctx.aPart || '';
+  const bPart = ctx.bPart || '';
+  const aStamp = nodeStamp(a, ctx.aStamp);
+  const bStamp = nodeStamp(b, ctx.bStamp);
+
+  // 1) 同名类型冲突：folder 优先（file 只是占位、不读内容），不看时间。
+  const aFolder = (a.type || 'folder') === 'folder';
+  const bFolder = (b.type || 'folder') === 'folder';
+  const keepA = (aFolder !== bFolder) ? aFolder : (pickNewerSide(aStamp, bStamp, aPart, bPart) === 'a');
+
+  // 2) children 永远取并集（与时间无关）：同名节点递归合并，其余直接并入。
+  const map = new Map();
+  const put = (child, sidePart, sideStamp) => {
+    const key = child.name;
+    if (!map.has(key)) {
+      map.set(key, { node: child, part: sidePart, stamp: sideStamp });
+      return;
+    }
+    const prev = map.get(key);
+    map.set(key, {
+      node: mergeVolumeTrees(prev.node, child, {
+        aPart: prev.part, bPart: sidePart, aStamp: prev.stamp, bStamp: sideStamp,
+      }),
+      // 归并后的 part 取字典序较大者、时间取较新者，保证后续再合并时判定仍确定。
+      part: (prev.part || '') > (sidePart || '') ? prev.part : sidePart,
+      stamp: maxStamp(prev.stamp, sideStamp),
+    });
+  };
+  for (const c of (Array.isArray(a.children) ? a.children : [])) put(c, aPart, aStamp);
+  for (const c of (Array.isArray(b.children) ? b.children : [])) put(c, bPart, bStamp);
+  const children = sortManifestChildren([...map.values()].map((x) => x.node));
+
+  // 3) 属性取胜者；tags / sources 取并集去重（累积信息，不被时间覆盖）。
+  const out = { ...(keepA ? a : b), children };
+  const tags = [...new Set([...(a.tags || []), ...(b.tags || [])])];
+  if (tags.length) out.tags = tags; else delete out.tags;
+  const sources = [...new Set([...(a.sources || []), ...(b.sources || [])])];
+  if (sources.length) out.sources = sources; else delete out.sources;
+  // volumeId 是驱动层的身份字段（子目录不携带）：两侧谁有就保留谁。
+  // 两侧都没有时不要凭空补一个 null——那会让「同一组输入合并两次」得到不同结果，破坏幂等。
+  const vid = a.volumeId || b.volumeId;
+  if (vid) out.volumeId = vid;
+
+  // 4) leaf 重算：合并后有子目录 → 不再是底部节点；两侧都没见过子目录才算底部。
+  if ((out.type || 'folder') === 'folder') {
+    const hasFolderChild = children.some((c) => (c.type || 'folder') === 'folder');
+    if (hasFolderChild) delete out.leaf;
+    else if (a.leaf === true || b.leaf === true) out.leaf = true;
+    else delete out.leaf;
+  }
+
+  // 5) updatedAt 取两者较新；合并结果不再是单个物理分片 → 去掉 part（写回归档时由调用方重新写 part）。
+  const stamp = maxStamp(aStamp, bStamp);
+  if (stamp != null) out.updatedAt = stamp; else delete out.updatedAt;
+  if (out.part && aPart !== bPart) delete out.part;
+
+  return out;
+}
+
+// 分片标识：默认用本机 ID（主机名）——一块盘在一台机器上的一份选择即一份分片；
+// 多台机器各自成片、互不覆盖，读取时按 volumeId 合并。
+function partIdFor() {
+  return sanitizeKey(state.computerId || 'host');
+}
+
+// 分片基名（不含 .json）：<volumeKey>.<partId>；partId 为空时退化为旧版单文件 <volumeKey>。
+function shardBaseName(volumeKey, partId) {
+  return partId ? volumeKey + '.' + partId : volumeKey;
+}
+
+// 该卷的全部已知分片基名（稳定排序）：远端列举 / 加载到的记入 state.shardIndex，本轮自己的分片始终并入。
+function volumeShardBases(indexKey, ownBase) {
+  const known = (state.shardIndex && state.shardIndex[indexKey]) || [];
+  return [...new Set([...known, ownBase])].sort((a, b) => a.localeCompare(b));
+}
+
+// 记录一块盘已知的分片（供预览与主机索引的 mounts.files 复用，随设置一起持久化）。
+function rememberShard(indexKey, base) {
+  if (!indexKey || !base) return;
+  const list = state.shardIndex[indexKey] || (state.shardIndex[indexKey] = []);
+  if (!list.includes(base)) list.push(base);
+  list.sort((a, b) => a.localeCompare(b));
+}
+
+// 缩略分片版本号的存储键：<volumeKey>::<partId>（每台机器自己维护，互不干扰）。
+function revisionKey(volumeKey, partId) {
+  return volumeKey + '::' + partId;
+}
+
+// 分片版本号：内部存的是「已成功上传的版本」，预览读到的是 +1（即下次上传会写入的版本号），
+// 因此「预览内容 == 上传内容」；仅本地记录，不影响 manifest 结构。
+const PART_REVISION_STORE = 'dirStructGen.partRevisions';
+function loadPartRevisions() {
+  try { return JSON.parse(localStorage.getItem(PART_REVISION_STORE) || '{}') || {}; } catch (_) { return {}; }
+}
+function revisionFor(partKey) {
+  const n = Number(loadPartRevisions()[partKey] || 0) + 1;
+  return (isFinite(n) && n > 0) ? n : 1;
+}
+function setRevision(partKey, rev) {
+  try {
+    const revs = loadPartRevisions();
+    revs[partKey] = rev;
+    localStorage.setItem(PART_REVISION_STORE, JSON.stringify(revs));
+  } catch (_) { /* 隐私模式等场景下不可用：下次仍从 1 起算，不影响上传与合并 */ }
+}
+
+// 卷索引键：优先稳定身份 volumeId，其次回退「主机::盘符」（与 volumeKeyFor 同源）。
+function volumeIndexKey(volumeId, letter, source) {
+  return volumeId ? String(volumeId) : ((source || state.computerId || '') + '::' + letter);
+}
+
+// 分片文件所属的 part.id（旧文件可能没有 part，则回退取 sources[0]）。
+function partIdOfDoc(doc) {
+  if (!doc) return '';
+  if (doc.part && doc.part.id) return String(doc.part.id);
+  if (Array.isArray(doc.sources) && doc.sources.length) return String(doc.sources[0]);
+  return '';
+}
+
+// 分片文件的整体时间戳：优先 part.generatedAt，其次顶层 generatedAt（兼容早先的 ISO 字符串）。
+function docStamp(doc) {
+  if (!doc) return null;
+  if (doc.part) {
+    const t = toEpochMs(doc.part.generatedAt);
+    if (t != null) return t;
+  }
+  return toEpochMs(doc.generatedAt);
+}
+
+// 列出 base 目录下已有的文件名。RemoteStorage 的目录 listing 是 GET 该目录返回的 JSON 对象：
+// { "xxx.json": {"ETag":...}, "sub/": {...} }——以 / 结尾的是子目录，这里只取文件。
+async function listRemoteFiles(href, token, base) {
+  const url = joinUrl(href, base);
+  try {
+    const res = await fetch(url, {
+      headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'application/json' },
+    });
+    if (!res.ok) return [];
+    const obj = await res.json().catch(() => null);
+    if (!obj || typeof obj !== 'object') return [];
+    return Object.keys(obj).filter((k) => !k.endsWith('/'));
+  } catch (_) { return []; }
+}
+
+// 从远端列举结果里挑出某卷的全部分片基名（含旧版单文件 <volumeKey>.json）并记入索引。
+function collectShardsFor(indexKey, volumeKey, names) {
+  for (const n of names) {
+    if (!n.endsWith('.json')) continue;
+    const base = n.slice(0, -'.json'.length);
+    if (base === volumeKey || base.startsWith(volumeKey + '.')) rememberShard(indexKey, base);
+  }
 }
 
 async function uploadToRS() {
@@ -1124,44 +1372,48 @@ async function uploadToRS() {
     renderTree();   // 刷新，让深挖目录的特殊标识显示出来
     regenerate();
 
-    const manifest = await generateManifest();
-
-    // 2) 复用与预览相同的 v2 拆分逻辑，保证「上传内容 == 预览内容」。
-    const payload = buildV2Payload(manifest, file);
-
-    // 3) 逐块盘：把卷文件与远端已有卷文件并集合并（多主机选择累加）后上传。
-    const headers = { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' };
-    let uploaded = 0;
-    for (const vol of payload.volumes) {
-      // 拉取已有卷文件（可能由其他主机上传过同一块盘）。
-      let existing = null;
-      try {
-        const g = await fetch(joinUrl(joinUrl(href, base), vol.name), {
-          headers: { 'Authorization': 'Bearer ' + token },
-        });
-        if (g.ok) existing = await g.json().catch(() => null);
-      } catch (_) { /* 远端无该卷文件 → 直接上传 */ }
-      const merged = existing && Array.isArray(existing.children)
-        ? mergeVolumeTrees(existing, vol.json)
-        : vol.json;
-      const srcSet = new Set([
-        ...(existing && Array.isArray(existing.sources) ? existing.sources : []),
-        ...vol.json.sources,
-      ]);
-      merged.sources = [...srcSet];
-
-      const vurl = joinUrl(joinUrl(href, base), vol.name);
-      const vres = await fetch(vurl, { method: 'PUT', headers, body: JSON.stringify(merged, null, 2) });
-      if (!vres.ok) throw new Error('HTTP ' + vres.status + ' (' + vol.name + ')');
-      uploaded++;
+    // 2) 先摸清远端 base 下已有哪些文件：同一卷的其他分片、旧版单文件都要写进 mounts.files，
+    //    供读取侧把它们合并起来（列举失败不阻断上传，只是本轮索引里少列几份）。
+    const names = await listRemoteFiles(href, token, base);
+    if (names.length) {
+      for (const d of (state.root.children || [])) {
+        if (d.kind !== 'dir' || !d.path) continue;
+        collectShardsFor(volumeKeyFor(d), sanitizeKey(volumeKeyFor(d)), names);
+      }
     }
 
-    // 4) 上传主机索引（文件名 = rsFile，已带 .json 则不再重复补后缀）。
+    // 3) 复用与预览相同的 v2 拆分逻辑，保证「上传内容 == 预览内容」。
+    const manifest = await generateManifest();
+    const payload = buildV2Payload(manifest, file);
+    await saveSettings(); // 记住已知分片，刷新后预览仍能列出同一卷的全部分片
+
+    // 4) 只写自己的分片（<volumeKey>.<partId>.json）：不再「读别人的文件 → 合并 → 写回同一文件」，
+    //    因此多台主机同时上传也不会互相覆盖、丢更新；完整目录树由读取侧按 volumeId 合并得到。
+    const headers = { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' };
+    let uploaded = 0;
+    const revs = [];
+    for (const vol of payload.volumes) {
+      const vurl = joinUrl(joinUrl(href, base), vol.name);
+      const vres = await fetch(vurl, { method: 'PUT', headers, body: JSON.stringify(vol.json, null, 2) });
+      if (!vres.ok) throw new Error('HTTP ' + vres.status + ' (' + vol.name + ')');
+      uploaded++;
+      rememberShard(vol.key, vol.base);
+      revs.push([
+        revisionKey(sanitizeKey(vol.key), vol.json.part.id),
+        vol.json.part.revision,
+      ]);
+    }
+
+    // 5) 上传主机索引（文件名 = rsFile，已带 .json 则不再重复补后缀）。
     const hurl = joinUrl(joinUrl(href, base), payload.hostIndex.name);
     const hres = await fetch(hurl, { method: 'PUT', headers, body: JSON.stringify(payload.hostIndex.json, null, 2) });
     if (!hres.ok) throw new Error('HTTP ' + hres.status + ' (host index)');
 
-    let msg = '上传成功：' + uploaded + ' 个卷 + 主机索引';
+    // 6) 上传成功后落盘分片版本号（下次生成时 +1），并持久化已知分片清单。
+    for (const [k, r] of revs) setRevision(k, r);
+    await saveSettings();
+
+    let msg = '上传成功：' + uploaded + ' 个卷分片 + 主机索引';
     if (total) msg += '（已应用 ' + total + ' 个深挖标记）';
     if (warns.length) msg += '；未匹配路径：' + warns.join(', ');
     setRS(msg, true);
@@ -1197,6 +1449,9 @@ function collectSettings() {
     rsFile: dom.rsFile.value.trim(),
     optFiles: dom.optFiles.checked,
     optSize: dom.optSize.checked,
+    // 已知分片清单（卷索引键 -> 基名数组）：只影响预览与主机索引里 mounts.files 的列全，
+    // 不参与合并判定（合并只看文件内容里的 volumeId / part）。
+    shardIndex: state.shardIndex || {},
   };
 }
 async function saveSettings() {
@@ -1228,6 +1483,15 @@ async function loadSettings() {
   dom.optFiles.checked = (s && typeof s.optFiles === 'boolean') ? s.optFiles : false;
   // 「汇总文件数与大小」默认开启（文件大小汇总通常都有用）。
   dom.optSize.checked = (s && typeof s.optSize === 'boolean') ? s.optSize : true;
+  // 回填「已知分片清单」：预览与主机索引的 mounts.files 据此把同一卷的全部分片列全。
+  const si = (s && s.shardIndex && typeof s.shardIndex === 'object') ? s.shardIndex : {};
+  state.shardIndex = {};
+  for (const [k, v] of Object.entries(si)) {
+    if (Array.isArray(v)) {
+      state.shardIndex[k] = v.filter((x) => typeof x === 'string')
+        .sort((a, b) => a.localeCompare(b));
+    }
+  }
 }
 
 /* ---------------- 加载外部 JSON 并展开目录树 ---------------- */
@@ -1359,20 +1623,45 @@ async function applyManifest(manifest) {
 }
 
 // 把一份已解析的清单（v1 或 v2）应用到当前磁盘树。
-// v1：直接 applyManifest；v2 主机索引：按 mounts 逐个拉取卷文件，重组成 v1 合并树后再 applyManifest。
-// fetchVolume(mountFileNoExt) => Promise<volObj|null>。
+// v1：直接 applyManifest；v2 主机索引：对每个 mounts 项读取该卷的**全部分片**
+// （优先 mounts.files，缺失则回退 mounts.file），按 part 元信息合并成一棵树后再 applyManifest。
+// fetchVolume(volumeFileBase) => Promise<volObj|null>，参数为不含 .json 的基名。
 async function applyLoadedDoc(doc, fetchVolume) {
   if (doc && doc.version === 2) {
     const children = [];
     for (const m of (doc.mounts || [])) {
-      const vol = await fetchVolume(m.file); // m.file 为不含 .json 的安全键
-      if (!vol) continue;
-      children.push({
+      // 同一块盘的多份目录结构文件：files（新格式，对象数组）> file（旧格式，单基名）。
+      const bases = (Array.isArray(m.files) && m.files.length
+        ? m.files.map((f) => (typeof f === 'string' ? f : (f && f.file))).filter(Boolean)
+        : (m.file ? [m.file] : []))
+        .sort((a, b) => a.localeCompare(b)); // 固定折叠顺序 → 合并结果确定
+      const indexKey = volumeIndexKey(m.volumeId, m.letter, doc.source);
+      let acc = null; // { doc, part, stamp }
+      for (const base of bases) {
+        const vol = await fetchVolume(base);
+        if (!vol) continue;
+        rememberShard(indexKey, base);
+        const side = { doc: vol, part: partIdOfDoc(vol), stamp: docStamp(vol) };
+        if (!acc) { acc = side; continue; }
+        const merged = mergeVolumeTrees(acc.doc, side.doc, {
+          aPart: acc.part, bPart: side.part, aStamp: acc.stamp, bStamp: side.stamp,
+        });
+        acc = {
+          doc: merged,
+          part: (acc.part > side.part ? acc.part : side.part),
+          stamp: maxStamp(acc.stamp, side.stamp),
+        };
+      }
+      if (!acc) continue;
+      const vol = acc.doc;
+      const drive = {
         name: m.letter,
         type: 'folder',
         volumeId: vol.volumeId || m.volumeId || null,
-        children: vol.children || [],
-      });
+        children: sortManifestChildren(vol.children || []),
+      };
+      if (vol.tags) drive.tags = vol.tags;
+      children.push(drive);
     }
     const combined = {
       version: 1,

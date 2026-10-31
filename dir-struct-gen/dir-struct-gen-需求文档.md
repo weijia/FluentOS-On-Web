@@ -104,8 +104,9 @@
   - 文件：仅当「包含文件」开启时，勾选的文件以 `{name, type:'file'}` 占位纳入（不读内容）。
 - 节点序列化字段：
   - 必有：`name`、`type: 'folder'`、`children`。
+  - 必有（本次新增）：`updatedAt`——该节点**最后一次被扫描确认存在**的时间，毫秒级 Unix epoch（UTC，如 `1793351520000`），供多分片合并时「按时间取新」。文件占位节点（开启「包含文件」时）同样携带。
   - 条件：驱动节点带 `volumeId`；有标签带 `tags`；磁盘确实无子目录带 `leaf: true`。
-- 顶层结构：`{ version:1, generatedAt, generator:'fluentos-dir-struct-gen', source:主机名, root:{...} }`。
+- 顶层结构：`{ version:1, generatedAt, generator:'fluentos-dir-struct-gen', source:主机名, root:{...} }`（`generatedAt` 保持 ISO 8601 字符串不变）。
 
 ### 4.7 清单操作
 
@@ -126,14 +127,15 @@ RemoteStorage 配置（href/token/base/file）位于页面底部折叠面板，�
 
 **上传到 RemoteStorage**（`uploadToRS`）：
 1. 应用 folder_deepen 深挖标记（按需多读磁盘层），并**清空**这些标记（消费）。
-2. 生成清单。
-3. 上传**主机索引**：`{ version:2, source, generatedAt, generator, mounts:[{letter, volumeId, file}] }`，文件名即清单文件名（默认 `app_data/folders/<主机名>.json`）。
-4. 逐块盘上传**独立卷文件**：文件名为盘 key（主机名::盘符 → 脱敏），内容含 `volumeId`、目录子树、`sources:[主机名]`。与远端已有同盘卷文件**按 name 并集合并**（多主机对同一盘的选择累加）。
-5. 上传时消费深挖标记（清空 `{marks:[]}` 写回）。
+2. `GET` 列出 `base` 目录，把同一卷已有分片（含旧版单文件 `<volumeKey>.json`）收进本机已知分片索引，供主机索引的 `mounts.files` 列全。
+3. 生成清单。
+4. 逐块盘上传**本机自己的分片**：文件名 `<volumeKey>.<partId>.json`（`volumeKey` 取 `volumeId`，取不到回退 `主机::盘符`，均经脱敏；`partId` 默认本机 ID），内容含 `volumeId`、`part:{id,revision,generatedAt}`、目录子树、`sources:[主机名]`。**只写自己的分片，不再读改写别人的文件**——多台主机同时上传不会互相覆盖。
+5. 上传**主机索引**：`{ version:2, source, generatedAt, generator, mounts:[{letter, volumeId, file, files}] }`，文件名即清单文件名（默认 `app_data/folders/<主机名>.json`）。`file` 为主文件基名（优先旧版单文件，否则字典序第一份分片），`files` 为该卷全部分片 `[{file, partId}]`。
+6. 上传成功后落盘分片版本号（下次生成时 +1）并持久化已知分片索引。
 
 **从 RS 加载**（`loadRemoteJSON`）：
 1. 读取主机索引清单（`base` + 清单文件名）。
-2. `applyManifest` 展开并勾选。
+2. 对每个 `mounts` 项取该卷全部分片（优先 `files`，缺失回退 `file`），**按 volumeId 合并**成一棵树（规则见 5.6）后再 `applyManifest` 展开并勾选。
 3. 读取 folder_deepen 深挖标记（**保留、不清空**），下钻展示其中的目录并打「深挖」徽章。
 4. 状态栏显示「已按 folder_deepen 下钻 N 个目录（标记保留）」；未读到则提示，未匹配路径列出前 6 条。
 
@@ -145,9 +147,10 @@ RemoteStorage 配置（href/token/base/file）位于页面底部折叠面板，�
 
 ### 4.10 参数持久化
 
-- RemoteStorage 参数与「包含文件」开关在变更时自动 `PUT /api/settings` 保存到本机服务（文件名即主机名）。
+- RemoteStorage 参数、「包含文件」「汇总文件数与大小」开关，以及**已知分片索引**（`shardIndex`：卷索引键 → 分片基名数组）在变更时自动 `PUT /api/settings` 保存到本机服务（文件名即主机名）。
 - 页面加载时 `GET /api/settings` 自动回填。
 - 默认值：`base=/app_data/folders/`、清单文件名=主机名。
+- 分片版本号（`part.revision`）单独存浏览器 `localStorage`（`dirStructGen.partRevisions`），随机器走、不写进服务端设置。
 
 ---
 
@@ -186,17 +189,26 @@ RemoteStorage 配置（href/token/base/file）位于页面底部折叠面板，�
 }
 ```
 
-### 5.2 卷文件（每盘一个）
+### 5.2 卷文件（每卷可有多份分片）
 
-位置：`<base>/<盘key脱敏>.json`，如 `app_data/folders/LAPTOP-91PR81Q2__C_.json`。
-结构：`{ volumeId, name, type:'folder', children, sources:[主机名...] }`。
+位置：`<base>/<盘key脱敏>.<partId>.json`，如 `app_data/folders/3664f754-44a1-4811-aa03-94bc529192ee.LAPTOP-91PR81Q2.json`；
+旧版单文件为 `<base>/<盘key脱敏>.json`（无 `part`，结构相同，仍会被一并合并读取，无需手工迁移）。
 
-盘 key 规则：`<主机名>::<盘符>` 经脱敏（`:` → `_`），如 `LAPTOP-91PR81Q2::C:` → `LAPTOP-91PR81Q2__C_`。
+结构：`{ volumeId, name, type:'folder', part:{ id, revision, generatedAt }, children, sources:[主机名] }`。
+
+- 盘 key 规则：优先用 `<盘根>/.dir-struct-id` 的 `volumeId`；取不到时回退 `<主机名>::<盘符>` 经脱敏（`:` → `_`），如 `LAPTOP-91PR81Q2::C:` → `LAPTOP-91PR81Q2__C_`。
+- `partId`：分片身份，默认本机 ID（主机名，脱敏后）。**同一块盘因此可以有多份目录结构文件**，每台主机一份、互不覆盖。
+- `part.revision`：该分片自增版本号（本机 `localStorage` 记录，每次成功上传 +1），预览里显示的是「下次上传将写入的版本号」；
+  `part.generatedAt`：毫秒级 Unix epoch 的生成时间（与节点 `updatedAt` 同一口径，便于合并比较）。
+- 上传只写自己的分片，**不再在别人的文件上「读 → 合并 → 写回」**。
 
 ### 5.3 主机索引
 
 位置：`<base>/<清单文件名>.json`，默认 `app_data/folders/<主机名>.json`。
-结构：`{ version:2, source, generatedAt, generator, mounts:[{letter, volumeId, file}] }`。
+结构：`{ version:2, source, generatedAt, generator, mounts:[{letter, volumeId, file, files}] }`。
+
+- `file`：主文件基名（不含 `.json`）——优先旧版单文件 `<volumeKey>`，否则取该卷分片里字典序第一份；供尚未支持 `files` 的读取侧兜底。
+- `files`：该卷**全部分片** `[{ file, partId }]`（`partId` 为 `null` 表示旧版单文件）；上传前由 `GET` 列出 `base` 目录、按 `<volumeKey>.` 前缀收集同卷分片。
 
 ### 5.4 folder_deepen 深挖标记
 
@@ -208,6 +220,23 @@ RemoteStorage 配置（href/token/base/file）位于页面底部折叠面板，�
 - 生成侧：磁盘上确实无子目录的目录写入 `"leaf": true`。
 - 读取侧（混合策略）：`leaf:true` 时**先回退校验磁盘一次**——磁盘确实为空才标为底部节点（无展开按钮、勾选整目录、不下钻）；若磁盘已有子目录（清单过时）则不信任，保留展开按钮、按常规处理。
 
+### 5.6 分片合并规则（同一卷多份文件合成一棵树）
+
+把同一 `volumeId` 的全部分片（含旧版单文件）合并成一棵树时按下列规则执行，**幂等且结果确定**：
+
+1. `children`：**并集**（递归合并同名子节点）——某台机没扫到不代表目录不存在，绝不因「另一份更新」而删掉别人的目录。
+2. 同名节点属性：按**最后确认时间取较新**——节点 `updatedAt` 优先，缺失则回退 `part.generatedAt` / 顶层 `generatedAt`。
+3. `tags` / `sources`：**并集去重**（累积信息，不被时间覆盖）。
+4. `leaf`：**重算**——合并后有子目录即去掉 `leaf`（否则读取侧不显示展开按钮，会把深挖出的层藏住）；两侧都没见过子目录才算底部。
+5. 同名类型冲突（`folder` vs `file`）：**folder 优先**，不看时间（`file` 只是占位、不读内容）。
+6. 时间缺失、或两侧时间差不超过 **5 分钟**（`MERGE_TIME_TOLERANCE_MS`，多机时钟未必同步）→ 按 `part.id` 字典序取大者兜底，保证同一组输入永远得到同一棵树（便于 diff / 缓存）。
+7. `volumeId`：驱动层身份字段，两侧谁有取谁，不会凭空补 `null`（否则破坏幂等）。
+
+补充：
+- `children` 合并后按「目录优先 + 名称数字感知」确定性排序（与树形视图同一口径）。
+- 时间戳口径：节点 `updatedAt` 为**毫秒级 Unix epoch 数字**（如 `1793351520000`），读取侧同时兼容早先写入的 ISO 字符串（数字直接采信、字符串按 ISO 解析）；epoch 只统一了表示，**不能修正各机时钟误差**，故仍需第 6 条的容差与 `part.id` 兜底。
+- 合并结果用于读取/展示，不写回成「一份合并文件」；需要归档时另行处理，且写回时不要保留多分片归并出来的 `part`。
+
 ---
 
 ## 6. 非功能需求
@@ -217,7 +246,7 @@ RemoteStorage 配置（href/token/base/file）位于页面底部折叠面板，�
 - **懒加载**：目录按需读取，避免一次加载整盘。
 - **容错**：无权限目录标记锁节点不崩溃；标签探测失败不阻断；RemoteStorage 失败不阻塞本地操作；参数保存失败不阻断。
 - **跨平台**：盘符列取/根归一化/卷身份兼容 Windows、macOS、Linux。
-- **跨主机去重**：靠 volumeId + sources 并集合并，多台电脑对同一块盘的选择可累加。
+- **跨主机合并**：同一块盘可由多份分片描述（默认每台主机一份），靠 `volumeId` 归组，按 5.6 规则合并；各主机只写自己的分片，**不会互相覆盖**，多台电脑对同一块盘的选择可累加。
 
 ---
 
@@ -229,3 +258,6 @@ RemoteStorage 配置（href/token/base/file）位于页面底部折叠面板，�
 4. **folder_deepen 是独立 category**：位于 `/app_data/folder-deepen/`，不在 `folders/` 下，避免与清单/卷文件混放。
 5. **卷身份优先于盘符**：用 `.dir-struct-id` 的 UUID 标识盘，跨主机/跨协议稳定；取不到时回退「主机+盘符」。
 6. **懒加载继承勾选**：新展开的子项继承父节点勾选态，保证级联一致。
+7. **一块盘可分多份分片，上传不再读改写**：每台主机写自己的 `<volumeKey>.<partId>.json`，避免旧实现「读别人的文件 → 合并 → 写回同一文件」在多机并发上传时丢更新；完整目录树改由读取侧按 `volumeId` 合并得到（规则见 5.6）。分片文件名不参与合并判定，因此改名不会断链。
+8. **合并口径「children 并集 + 属性按时间取新」**：children 永远并集（不因另一份更新而删掉别人的目录），只有节点属性按 `updatedAt`（毫秒 epoch）取新；时间不可比较时按 `part.id` 字典序兜底，保证结果幂等、确定、可 diff。
+9. **时间戳口径统一**：新增时间字段一律毫秒级 Unix epoch 数字（UTC），顶层 `generatedAt` 保持 ISO 字符串不变；读取侧需同时兼容旧的 ISO 字符串写法。
