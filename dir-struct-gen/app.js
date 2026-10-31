@@ -358,14 +358,19 @@ function renderNode(node, isRoot = false) {
     tag.textContent = '📄';
   }
 
-  if (hasSize) {
+  // 刷新按钮：该目录「已加入索引（勾选/半选）」或「已有大小缓存」时均显示，
+  // 作为「获取 / 刷新大小」的统一入口。这样即便 optSize（自动汇总）未开、自动汇总未触发，
+  // 用户勾选目录后也能立刻点 ↻ 主动获取大小，而不必等到某次 /api/summary 被缓存。
+  const canRefresh = node.kind === 'dir' && (node.checked || node.indeterminate || hasSize);
+  if (canRefresh) {
     const rbtn = document.createElement('button');
     rbtn.type = 'button';
     rbtn.className = 'refresh-btn';
     rbtn.textContent = '↻';
     rbtn.title = '刷新该目录的大小（重新扫描磁盘，仅更新此目录及其子树）';
     rbtn.addEventListener('click', (ev) => { ev.stopPropagation(); refreshSummary(node); });
-    row.append(twisty, cb, name, sizeInfo, rbtn, tag);
+    if (hasSize) row.append(twisty, cb, name, sizeInfo, rbtn, tag);
+    else row.append(twisty, cb, name, rbtn, tag);
   } else {
     row.append(twisty, cb, name, tag);
   }
@@ -623,12 +628,14 @@ function clearSummaries(node) {
 function collectSummaryRoots(node, ancestorCovered) {
   const result = [];
   const isRealDir = node.kind === 'dir' && node.path;
-  // 会进清单的目录节点：checked（整目录选中）或 indeterminate（半选，仅部分后代被选中）。
-  const covered = !!node.checked || !!node.indeterminate;
-  if (isRealDir && covered && !ancestorCovered) result.push(node);
-  // 向下覆盖规则：本节点已是扫描根时，其后代无需再独立成根（祖先那次扫描已覆盖它们）。
+  // 扫描根只认「整目录勾选(checked)」的目录。indeterminate（仅部分后代被选中）**不是**独立扫描根——
+  // 它的已选后代会各自成为根；若把半选祖先当根，会遇到「只选了个深层目录，却请求整块父盘(如 C:\) 并扫整盘」。
+  const selected = !!node.checked;
+  if (isRealDir && selected && !ancestorCovered) result.push(node);
+  // 向下覆盖规则：本节点整目录勾选时，其后代无需再独立成根（那次扫描已覆盖它们）。
   // 虚拟根「此电脑」没有真实路径（isRealDir=false），checked 只是容器语义，不向下覆盖。
-  const childAncestorCovered = ancestorCovered || (isRealDir && covered);
+  // 注意：半选(indeterminate)祖先不向下覆盖（它没整选），其 checked 后代仍会被独立收集为根。
+  const childAncestorCovered = ancestorCovered || (isRealDir && selected);
   for (const c of (node.children || [])) {
     if (c.kind === 'dir') result.push(...collectSummaryRoots(c, childAncestorCovered));
   }
@@ -793,7 +800,7 @@ async function generateManifest(genAt) {
   // 先对用到的盘惰性写入稳定身份标记（异步，不阻塞；失败回退序列号）。
   await ensureDriveVolumeIds();
   if (includeSizes && state.root) {
-    const roots = collectSummaryRoots(state.root); // 会进清单目录的最小独立扫描根（勾选或半选）
+    const roots = collectSummaryRoots(state.root); // 会进清单目录的最小独立扫描根（仅整目录勾选 checked；半选祖先不自成根，避免误扫整盘）
     // 把「尚未缓存」的根分批发给后端；已缓存（含各自整棵子树）的根直接命中 summaryCache，
     // 取消勾选/重选导致根集合变化时也不会重复扫描父目录。
     await fetchAllSummaries(roots.map(r => r.path));

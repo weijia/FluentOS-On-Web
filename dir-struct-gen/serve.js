@@ -21,6 +21,10 @@ const os = require('os');
 const crypto = require('crypto');
 const { execFileSync, execFile } = require('child_process');
 
+// 可选加速封装：Windows 且已安装 node-windows-readdir-fast 时启用，单次枚举带回文件大小，
+// 省掉 /api/summary 逐文件 stat 的开销；否则 available=false，下方回退原生 fs（零依赖仍可用）。
+const fastEnum = require('./fast-enum');
+
 const ROOT = __dirname;
 const PORT = process.env.DSG_PORT ? Number(process.env.DSG_PORT) : 8000;
 
@@ -462,6 +466,60 @@ async function statForSummary(p) {
   return withTimeout(fs.promises.stat(p), SUMMARY_STAT_TIMEOUT_MS);
 }
 
+// 读取某目录的「一层直接子项」，并尽量带回每个文件的大小。
+// 返回数组 [{ name, isDirectory, size, sizeOnDisk, symlink, partial }] 或 null（确实读不到）。
+// 两种实现：
+//   - 快速路径（fastEnum.available，仅 Windows 且已装包）：readdirFastSync(dir,false) 一次系统调用
+//     拿到全部直接子项与文件 length，零 stat；重新分析点(符号链接/junction)按属性标记 symlink 交回调用方 stat 解析。
+//   - 原生回退（其他平台 / 未装包）：readdirForSummary(带超时重试) + 按需对文件 stat，行为与历史版本一致。
+// needSizes=true 时原生回退才对每个文件 stat 取大小（避免纯浏览时不必要的 stat）；快速路径大小免费、始终带回。
+async function readdirOneLevel(dir, needSizes) {
+  if (fastEnum.available) {
+    try {
+      const gen = fastEnum.readdirFastSync(dir, false); // 单层，非递归
+      const out = [];
+      for (const e of gen) {
+        if (e.name === '.' || e.name === '..') continue;
+        if (e.name === VOLUME_MARKER) continue; // 跳过磁盘身份标记文件
+        const reparse = (e.attributes & 0x400) !== 0; // FILE_ATTRIBUTE_REPARSE_POINT
+        const isDir = !!e.isDirectory;               // 真实目录 + junction 均为 true
+        const isLink = reparse && !isDir;            // 真正的符号链接（可能指向文件或目录），需 stat 解析
+        const len = (typeof e.length === 'number' && e.length >= 0) ? e.length : 0;
+        out.push({ name: e.name, isDirectory: isDir, size: len, sizeOnDisk: len, symlink: isLink });
+      }
+      return out;
+    } catch (_) { /* 快速路径失败：回退原生，保证可用 */ }
+  }
+  // 原生回退
+  const dirents = await readdirForSummary(dir);
+  if (!dirents) return null;
+  const out = [];
+  for (const e of dirents) {
+    if (e.name === VOLUME_MARKER) continue;
+    if (e.isDirectory()) {
+      out.push({ name: e.name, isDirectory: true, size: 0, sizeOnDisk: 0, symlink: false, partial: false });
+    } else if (e.isSymbolicLink()) {
+      let isDir = false, size = 0, sizeOnDisk = 0, entryPartial = false;
+      try {
+        const st = await statForSummary(path.join(dir, e.name));
+        isDir = st.isDirectory();
+        if (!isDir) { const pair = sizePairOf(st); size = pair.size; sizeOnDisk = pair.sizeOnDisk; }
+      } catch (_) { entryPartial = true; /* 链接不可达：标记不完整 */ }
+      out.push({ name: e.name, isDirectory: isDir, size, sizeOnDisk, symlink: true, partial: entryPartial });
+    } else {
+      let size = 0, sizeOnDisk = 0, entryPartial = false;
+      if (needSizes) {
+        try {
+          const pair = sizePairOf(await statForSummary(path.join(dir, e.name)));
+          size = pair.size; sizeOnDisk = pair.sizeOnDisk;
+        } catch (_) { entryPartial = true; /* 取不到数值：记 0 并标记不完整 */ }
+      }
+      out.push({ name: e.name, isDirectory: false, size, sizeOnDisk, symlink: false, partial: entryPartial });
+    }
+  }
+  return out;
+}
+
 // 递归统计某目录下「全部文件（含子孙）」的数量与总大小（字节）。
 // 一次性遍历整棵子树，把所有目录的绝对路径 → {fileCount, totalSize} 写进 acc，
 // 前端只需对每块盘根调用一次，即可拿到其下每个目录的汇总，避免按选中目录逐个重复扫描。
@@ -503,9 +561,12 @@ async function summarizeTree(p, visited, depth, acc, realpathSums) {
     visited.delete(rp);
     return summary;
   }
-  const dirents = await readdirForSummary(p);
-  if (!dirents) {
-    // 读不到（超时重试后仍失败 / 权限不足等）：保留已统计到的下界并标记不完整，绝不静默记 0。
+  // 单层枚举该目录的直接子项，并尽量带回每个文件的大小（快速路径零 stat；原生回退按需 stat）。
+  // 保留原 readdirForSummary 的「读不到即标记不完整、绝不记 0」口径。
+  const ents = await readdirOneLevel(p, true);
+  if (!ents) {
+    // 读不到（快速路径异常回退后仍失败 / 超时重试后仍失败 / 权限不足等）：
+    // 保留已统计到的下界并标记不完整，绝不静默记 0。
     summary.partial = true;
     if (acc && p) acc.set(p, summary);
     visited.delete(rp);
@@ -513,14 +574,13 @@ async function summarizeTree(p, visited, depth, acc, realpathSums) {
   }
   let fileCount = 0, totalSize = 0, totalSizeOnDisk = 0, partial = false;
   const dirJobs = [];
-  const fileSizeJobs = [];
-  for (const e of dirents) {
-    if (e.name === VOLUME_MARKER) continue; // 跳过磁盘身份标记文件
-    if (e.isDirectory()) {
+  const linkJobs = [];
+  for (const e of ents) {
+    if (e.isDirectory) {
       dirJobs.push(summarizeTree(path.join(p, e.name), visited, depth + 1, acc, realpathSums));
-    } else if (e.isSymbolicLink()) {
-      // 符号链接：先判定是否指向目录，再决定是否下钻（避免对文件链接误判）。
-      dirJobs.push((async () => {
+    } else if (e.symlink) {
+      // 符号链接 / junction 链接：先判定是否指向目录，再决定是否下钻（避免对文件链接误判）。
+      linkJobs.push((async () => {
         try {
           if ((await statForSummary(path.join(p, e.name))).isDirectory()) {
             return summarizeTree(path.join(p, e.name), visited, depth + 1, acc, realpathSums);
@@ -532,32 +592,27 @@ async function summarizeTree(p, visited, depth, acc, realpathSums) {
         }
       })());
     } else {
+      // 普通文件：累计数量与大小。快速路径下 size/sizeOnDisk 已在单次枚举里带回，无需再 stat；
+      // 原生回退下由 readdirOneLevel 按需 stat 取（取不到则记 0 并标记 partial）。
       fileCount += 1;
-      // 说明：readdir 返回的 Dirent 只有 name/type，没有 size，所以这里实际都走 stat 取数值。
-      // 一次 stat 同时取「逻辑大小」与「占用磁盘空间」（占用取不到 → 用逻辑大小替代）。
-      if (typeof e.size === 'number') {
-        totalSize += e.size;
-        totalSizeOnDisk += e.size; // 没有 stat 结果时按逻辑大小替代
-      } else {
-        fileSizeJobs.push((async () => {
-          try { return sizePairOf(await statForSummary(path.join(p, e.name))); }
-          catch (_) { return { unknown: true }; } // 取不到数值：不按 0 计入，标记下界
-        })());
-      }
+      totalSize += e.size;
+      totalSizeOnDisk += e.sizeOnDisk;
+      if (e.partial) partial = true; // 个别文件 stat 失败 → 本目录总量只是下界
     }
   }
-  const [subs, extraSizes] = await Promise.all([Promise.all(dirJobs), Promise.all(fileSizeJobs)]);
+  const [subs, linkRes] = await Promise.all([Promise.all(dirJobs), Promise.all(linkJobs)]);
   for (const s of subs) {
     fileCount += s.fileCount;
     totalSize += s.totalSize;
     totalSizeOnDisk += (typeof s.totalSizeOnDisk === 'number' ? s.totalSizeOnDisk : s.totalSize);
     if (s.partial) partial = true; // 子树里有一处不完整 → 本目录的总量同样只是下界
   }
-  for (const s of extraSizes) {
-    if (s && typeof s === 'object' && s.unknown) partial = true;
+  for (const s of linkRes) {
+    if (s && s.partial) partial = true;
     else {
-      totalSize += s.size;
-      totalSizeOnDisk += s.sizeOnDisk;
+      fileCount += s.fileCount;
+      totalSize += s.totalSize;
+      totalSizeOnDisk += (typeof s.totalSizeOnDisk === 'number' ? s.totalSizeOnDisk : s.totalSize);
     }
   }
   // 原地更新占位对象（所有复用方通过引用同步拿到最终值），并按原始路径记录。
@@ -687,6 +742,7 @@ const server = http.createServer((req, res) => {
         for (const [k, v] of acc) summaries[k] = v;
         sendJSON(res, 200, { roots: paths, summaries });
       } catch (err) {
+        console.error('[api/summary] ERROR:', err && err.stack ? err.stack : err);
         sendJSON(res, 404, { error: err.code || 'error', message: err.message });
       }
     })();
