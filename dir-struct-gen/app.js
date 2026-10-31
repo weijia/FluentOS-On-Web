@@ -317,15 +317,18 @@ function renderNode(node, isRoot = false) {
   name.className = 'name';
   name.textContent = node.name + (isRoot ? '  (根)' : '');
 
-  // 目录大小徽标：仅当该目录「已加入索引」（被勾选 checked 或半选 indeterminate，
-  // 即会出现在生成的清单里）时才展示其（含子孙）的文件数与总大小。未选中的目录不取大小、不显示，
-  // 避免把已取消勾选的目录误显示成「有大小」。
+  // 目录大小徽标：只要该目录「已有缓存的汇总」（含子孙的文件数与总大小）就展示，
+  // 不再要求它当前被勾选——未选中、但历史上曾作为某次子树扫描的一部分被取过的目录，
+  // 也能继续显示大小。getSummary 只查本地路径级缓存，**不会**为未选中目录发起请求；
+  // 缓存里没有该目录时返回 null，即不显示、也不主动获取。
   const sizeInfo = document.createElement('span');
   sizeInfo.className = 'size-info';
   let hasSize = false;
-  if (node.kind === 'dir' && (node.checked || node.indeterminate) && node._summary) {
-    sizeInfo.textContent = formatCount(node._summary.fileCount) + ' 项 · ' + formatSize(node._summary.totalSize);
-    sizeInfo.title = '文件数 ' + node._summary.fileCount + ' · 总大小 ' + node._summary.totalSize + ' 字节';
+  const sum = node.kind === 'dir' ? getSummary(node.path) : null;
+  if (sum) {
+    sizeInfo.textContent = formatCount(sum.fileCount) + ' 项 · ' + formatSize(sum.totalSize);
+    const upd = sum.at ? ' · 更新于 ' + new Date(sum.at).toLocaleTimeString() : '';
+    sizeInfo.title = '文件数 ' + sum.fileCount + ' · 总大小 ' + sum.totalSize + ' 字节' + upd;
     hasSize = true;
   }
 
@@ -339,8 +342,17 @@ function renderNode(node, isRoot = false) {
     tag.textContent = '📄';
   }
 
-  if (hasSize) row.append(twisty, cb, name, sizeInfo, tag);
-  else row.append(twisty, cb, name, tag);
+  if (hasSize) {
+    const rbtn = document.createElement('button');
+    rbtn.type = 'button';
+    rbtn.className = 'refresh-btn';
+    rbtn.textContent = '↻';
+    rbtn.title = '刷新该目录的大小（重新扫描磁盘，仅更新此目录及其子树）';
+    rbtn.addEventListener('click', (ev) => { ev.stopPropagation(); refreshSummary(node); });
+    row.append(twisty, cb, name, sizeInfo, rbtn, tag);
+  } else {
+    row.append(twisty, cb, name, tag);
+  }
 
   // 「含子目录」递归选择开关（仅目录、非根）：一次性勾选该目录及其下全部子孙目录。
   if (node.kind === 'dir' && !isRoot) {
@@ -553,9 +565,9 @@ async function buildManifestAsync(node, includeFiles, ctx) {
 }
 
 // 清空所有树节点上缓存的目录大小（_summary）。每次重新生成清单前调用：
-// 仅「当前在索引里」的目录会在 buildManifestAsync 遍历时重新挂上 _summary，
-// 被取消勾选（或祖先被取消）的目录因不再被遍历而不会重新获得 _summary，从而
-// 保证树形视图里只有「已加入索引」的目录才显示大小，避免残留旧大小。
+// buildManifestAsync 遍历时只对「当前在索引里」的目录重新挂上 _summary，它是**清单输出**
+// 的字段来源（只写选中目录）；树形视图的大小徽标则直接查路径级缓存 getSummary()，
+// 不依赖 _summary，因此未选中但曾取过大小的目录仍可正常显示。
 function clearSummaries(node) {
   if (!node) return;
   delete node._summary;
@@ -587,18 +599,15 @@ function collectSummaryRoots(node, ancestorChecked) {
 // 文件大小汇总缓存：按「单个目录路径」缓存 /api/summary 的结果。后端对每个根递归统计整棵子树，
 // 单次请求即返回该根下所有目录（含子孙）的 fileCount/totalSize；前端把返回的每个目录都写进本缓存，
 // 因此「取消勾选/重选」导致扫描根集合变化时，已扫描过的子树仍命中本缓存，绝不会重复扫描整块父目录。
-// TTL 内复用，避免短时间内重复扫描磁盘。
+// 永不自动过期：目录大小只在用户手动点某目录的「刷新」按钮、或点「重新生成」(summaryCache.clear()) 时更新；
+// 因此隔多久再访问同一目录都不会产生多余的 /api/summary 请求。at 仅用于显示「上次更新时间」。
 const summaryCache = new Map(); // path -> { fileCount, totalSize, at }
-const SUMMARY_TTL = 120000;     // 缓存有效期 2 分钟（之后自动重新扫描以反映磁盘变化）
 
-// 从路径级缓存取某目录的汇总；过期或缺失返回 null。后端曾把该目录连同其整棵子树一起返回并写入缓存，
-// 故直接查本缓存即可拿到「含子孙」的任意目录大小，无需重新请求后端。
+// 从路径级缓存取某目录的汇总；命中即返回（永不自动过期，缺失返回 null）。后端曾把该目录连同其整棵
+// 子树一起返回并写入缓存，故直接查本缓存即可拿到「含子孙」的任意目录大小，无需重新请求后端。
 function getSummary(path) {
   if (!path) return null;
-  const c = summaryCache.get(path);
-  if (!c) return null;
-  if ((Date.now() - c.at) >= SUMMARY_TTL) return null;
-  return c;
+  return summaryCache.get(path) || null;
 }
 
 // 目录浏览缓存：按「绝对路径」缓存该目录已加载的子项列表，跨节点对象重建（加载 JSON 清单、
@@ -614,12 +623,9 @@ async function fetchAllSummaries(rootPaths) {
   if (!rootPaths || !rootPaths.length) return;
   const uniq = [...new Set(rootPaths)];
   const now = Date.now();
-  // 只挑「路径级缓存缺失或过期」的根；由于之前取某根时已将其整棵子树一并写入缓存，
-  // 因此命中缓存的根意味着它和它所有子孙都已在缓存，无需再请求——这是取消勾选后不重扫父目录的关键。
-  const missing = uniq.filter(p => {
-    const c = summaryCache.get(p);
-    return !c || (now - c.at) >= SUMMARY_TTL;
-  });
+  // 只挑「路径级缓存缺失」的根（缓存永不自动过期，故只看在不在）；由于之前取某根时已将其整棵子树
+  // 一并写入缓存，命中缓存的根意味着它和它所有子孙都已在缓存，无需再请求——取消勾选/重选都不会重扫父目录。
+  const missing = uniq.filter(p => !summaryCache.has(p));
   if (missing.length === 0) return; // 全部命中缓存，后端零请求
   setStatus('正在汇总选中目录的文件大小…');
   // 把所有缺失根拼进同一个 /api/summary 请求（?path=A&path=B&…），后端对每个根递归统计整棵子树，
@@ -638,6 +644,33 @@ async function fetchAllSummaries(rootPaths) {
     for (const [k, v] of Object.entries(sums)) summaryCache.set(k, { fileCount: v.fileCount, totalSize: v.totalSize, at: now });
   } catch (_) {
     // 失败/超时：本次放弃大小汇总，但不写脏缓存；下次 regenerate 仍会重试缺失根。
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// 手动刷新某个目录的大小：只向 /api/summary 请求该目录（含其整棵子树），把返回写入路径级缓存，
+// 然后触发 regenerate —— 由于缓存已被本次结果填满，regenerate 不会再发任何 /api/summary 请求，
+// 仅把最新的 fileCount/totalSize 反映到目录行徽标与预览清单上。用于「缓存不过期」策略下，
+// 用户想让某个目录的大小反映磁盘最新变化时的主动刷新入口。
+async function refreshSummary(node) {
+  if (!node || node.kind !== 'dir' || !node.path) return;
+  setStatus('正在刷新 ' + node.path + ' 的大小…');
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 180000);
+  try {
+    const res = await fetch('/api/summary?path=' + encodeURIComponent(node.path), { signal: ctrl.signal });
+    if (!res.ok) { setStatus('刷新失败：HTTP ' + res.status); return; }
+    const data = await res.json();
+    const sums = (data && data.summaries) || {};
+    const now = Date.now();
+    // 把返回的每一个目录（含子孙）写进路径级缓存；已存在则覆盖为最新值。
+    for (const [k, v] of Object.entries(sums)) summaryCache.set(k, { fileCount: v.fileCount, totalSize: v.totalSize, at: now });
+    regenerate(); // 重渲染树徽标 + 刷新预览清单（缓存已是最新，不会产生新的网络请求）
+    const s = summaryCache.get(node.path);
+    setStatus('已刷新 ' + node.path + ' 的大小' + (s ? ('（' + formatCount(s.fileCount) + ' 项 · ' + formatSize(s.totalSize) + '）') : ''));
+  } catch (e) {
+    setStatus('刷新失败：' + (e && e.message ? e.message : e));
   } finally {
     clearTimeout(timer);
   }
