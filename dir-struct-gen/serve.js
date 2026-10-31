@@ -6,6 +6,8 @@
 //   GET /api/drives            -> { computerId, drives: ["C:\\", "D:\\", ...] }
 //   GET /api/list?path=<dir>   -> { path, items: [{ name, kind, tags }] }
 //                                  tags 由后端按目录内容自动探测（如含 .git ⇒ "git"）
+//   GET /api/tree?path=<dir>   -> { path, tree }  递归返回该目录下的完整子目录树（单次请求），
+//                                  每个节点含 { name, kind, tags, hasSubdir, children }，
 //   GET /api/settings          -> 本机持久化的 UI 参数（RemoteStorage 等），文件名即主机名
 //   PUT /api/settings          -> 写入上述参数（body 为 JSON）
 //
@@ -17,7 +19,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
-const { execFileSync } = require('child_process');
+const { execFileSync, execFile } = require('child_process');
 
 const ROOT = __dirname;
 const PORT = process.env.DSG_PORT ? Number(process.env.DSG_PORT) : 8000;
@@ -178,35 +180,89 @@ function ensureVolumeId(root) {
   }
 }
 
-// 把盘根路径规整成「驱动对象」，附带稳定的 volumeId。
+// 列出驱动时使用的「只读」稳定身份：只读取已有标记文件，没有则回退卷序列号。
+// 绝不写盘——写入在真正纳入清单时（ensureVolumeIdAsync）才惰性、异步进行。
+// 这样列驱动（含启动时的首次请求）只做快速读取，不会因在盘根写文件而卡顿/阻塞。
+function readVolumeId(root) {
+  const r = normalizeRoot(root);
+  if (!r) return null;
+  const marker = path.join(r, VOLUME_MARKER);
+  try {
+    const existing = fs.readFileSync(marker, 'utf8').trim();
+    if (/^[0-9a-fA-F-]{8,}$/.test(existing)) return existing;
+  } catch (_) { /* 还没有标记文件 */ }
+  // 无标记文件：回退卷序列号（不依赖写盘权限，真实本地盘稳定可用）。
+  return getVolumeSerial(r);
+}
+
+// execFile 的 Promise 封装（仅取 stdout）。
+function execFileAsync(cmd, args, opts) {
+  return new Promise((resolve, reject) => {
+    execFile(cmd, args, opts, (err, stdout) => {
+      if (err) reject(err); else resolve(stdout);
+    });
+  });
+}
+
+// 给 Windows 标记文件加隐藏属性（异步、best-effort）。
+async function runAttrib(marker) {
+  if (process.platform !== 'win32') return;
+  try { await withTimeout(execFileAsync('attrib', ['+h', marker], { windowsHide: true }), 2000); } catch (_) {}
+}
+
+// 真正纳入清单时调用：尽量把稳定身份写成磁盘根标记文件（跨主机一致），已存在则跳过。
+// 异步、best-effort、带超时，绝不阻塞列举 / 服务器；写不了（只读盘/无权限/超时）就回退序列号。
+async function ensureVolumeIdAsync(root) {
+  const r = normalizeRoot(root);
+  if (!r) return null;
+  const marker = path.join(r, VOLUME_MARKER);
+  try {
+    const existing = fs.readFileSync(marker, 'utf8').trim();
+    if (/^[0-9a-fA-F-]{8,}$/.test(existing)) return existing;
+  } catch (_) { /* 还没有 */ }
+  const id = crypto.randomUUID();
+  try {
+    await withTimeout(fs.promises.writeFile(marker, id), 4000);
+    await runAttrib(marker);
+    return id;
+  } catch (_) {
+    return getVolumeSerial(r);
+  }
+}
+
+// 把盘根路径规整成「驱动对象」，附带稳定的 volumeId（列举阶段只读，飞快）。
 function driveObj(root) {
   const r = normalizeRoot(root);
   const letter = r || root;
-  return { letter, root: r, volumeId: ensureVolumeId(r) };
+  return { letter, root: r, volumeId: readVolumeId(r) };
 }
 
-function listDrives() {
+async function listDrives() {
   const platform = process.platform;
   if (platform === 'win32') {
     try {
-      const out = execFileSync(
+      const out = (await execFileAsync(
         'powershell',
         ['-NoProfile', '-NonInteractive', '-Command',
          '(Get-PSDrive -PSProvider FileSystem).Root'],
-        { timeout: 8000, windowsHide: true }
-      ).toString();
+        { timeout: 8000, windowsHide: true, maxBuffer: 1024 * 1024 }
+      )).toString();
       const drives = out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
       if (drives.length) return drives.map(driveObj);
     } catch (_) { /* fall through to probing */ }
-    // Fallback: probe A–Z drive letters.
-    const found = [];
+    // Fallback: 探测 C–Z 盘符（跳过 A:/B: 软驱——readdirSync 在缺失软驱上会长时间阻塞）。
+    // 各盘并行探测 + 每盘 1.5s 超时，避免某块不可达盘（断网网盘等）拖死整个列举。
+    const probes = [];
     for (let i = 67; i <= 90; i++) {
       const letter = String.fromCharCode(i);
-      try {
-        fs.readdirSync(letter + ':\\');
-        found.push(letter + ':\\');
-      } catch (_) { /* not a ready drive */ }
+      probes.push((async () => {
+        try {
+          await withTimeout(fs.promises.readdir(letter + ':\\'), 1500);
+          return letter + ':\\';
+        } catch (_) { return null; }
+      })());
     }
+    const found = (await Promise.all(probes)).filter(Boolean);
     return found.map(driveObj);
   }
   if (platform === 'darwin') {
@@ -305,22 +361,76 @@ async function listDir(p, withSizes) {
   return items;
 }
 
+// 递归列出某目录下的「完整子目录树」，单次请求即返回整棵子树（含所有子孙目录），
+// 供前端「含子目录」递归选择使用——替代前端对每个目录各发一次 /api/list 的做法。
+// 与 summarizeTree 类似：用真实路径集合防止符号链接 / junction 死循环；depth 上限兜底。
+// withFiles=true 时叶子目录下也带回文件节点（默认只返回目录，契合「含子目录」语义）。
+async function buildTree(p, visited, depth, withFiles) {
+  if (depth > 200) return null;
+  let rp;
+  try { rp = await fs.promises.realpath(p); } catch (_) { rp = p; }
+  if (visited.has(rp)) return null; // 环：跳过，避免无限递归
+  visited.add(rp);
+  let items;
+  try { items = await listDir(p, false); }
+  catch (_) { visited.delete(rp); return null; } // 该目录不可读：作为空处理，不阻断整棵树的其余分支
+  const node = { name: path.basename(p) || p, kind: 'dir', children: [] };
+  // 并行下钻所有子目录（同时保留每个目录的自动标签 / 是否还有子目录的探测结果）。
+  const jobs = [];
+  for (const it of items) {
+    if (it.kind === 'dir') {
+      jobs.push((async () => {
+        const sub = await buildTree(path.join(p, it.name), visited, depth + 1, withFiles);
+        if (sub) {
+          sub.tags = it.tags || [];
+          sub.hasSubdir = it.hasSubdir;
+          node.children.push(sub);
+        }
+      })());
+    } else if (withFiles) {
+      node.children.push({ name: it.name, kind: 'file' });
+    }
+  }
+  await Promise.all(jobs);
+  visited.delete(rp);
+  // 子目录按名称自然序（与 listDir 保持一致），再按 kind 排（dir 在前）。
+  node.children.sort((a, b) => {
+    if (a.kind !== b.kind) return a.kind === 'dir' ? -1 : 1;
+    return a.name.localeCompare(b.name, undefined, { numeric: true });
+  });
+  return node;
+}
+
 // 递归统计某目录下「全部文件（含子孙）」的数量与总大小（字节）。
 // 一次性遍历整棵子树，把所有目录的绝对路径 → {fileCount, totalSize} 写进 acc，
 // 前端只需对每块盘根调用一次，即可拿到其下每个目录的汇总，避免按选中目录逐个重复扫描。
 // 循环防护：用真实路径集合防止符号链接 / junction 造成的死循环；depth 上限兜底。
-async function summarizeTree(p, visited, depth, acc) {
-  if (depth > 200) return { fileCount: 0, totalSize: 0 };
+// realpathSums：跨根共享的「真实路径 -> 聚合对象」表。遇到符号链接 / junction 指向同一物理
+// 目录时，直接复用其聚合对象（原地更新）并以「原始路径」为键写入 acc，既不重复扫描磁盘，
+// 也保证前端树里每个节点（含链接、含指向正在统计中的祖先的链接）都能查到大小，不再漏记。
+async function summarizeTree(p, visited, depth, acc, realpathSums) {
+  if (depth > 200) { if (acc && p) acc.set(p, { fileCount: 0, totalSize: 0 }); return { fileCount: 0, totalSize: 0 }; }
   let rp;
   try { rp = await fs.promises.realpath(p); } catch (_) { rp = p; }
-  if (visited.has(rp)) return { fileCount: 0, totalSize: 0 };
+  // 真实路径已被统计过（或正在统计中）：复用同一个聚合对象（引用共享，算完原地更新），
+  // 仍以原始路径为键记录，避免漏记 + 避免重复扫盘（含指向祖先的 junction 自引用场景）。
+  if (realpathSums && realpathSums.has(rp)) {
+    const existing = realpathSums.get(rp);
+    if (acc && p) acc.set(p, existing);
+    return existing;
+  }
+  if (visited.has(rp)) { if (acc && p) acc.set(p, { fileCount: 0, totalSize: 0 }); return { fileCount: 0, totalSize: 0 }; }
   visited.add(rp);
+  // 先放占位对象并登记到 realpathSums：这样指向本目录的 junction / 祖先自引用可复用同一个对象，
+  // 待下方算完后原地更新其值（引用共享），无需重复扫盘也不漏记，且无环。
+  const summary = { fileCount: 0, totalSize: 0 };
+  if (realpathSums) realpathSums.set(rp, summary);
   let dirents;
   try {
     dirents = await withTimeout(fs.promises.readdir(p, { withFileTypes: true }), 4000);
   } catch (_) {
     visited.delete(rp);
-    return { fileCount: 0, totalSize: 0 };
+    return summary; // 占位对象已含 0/0，acc 也已通过 realpathSums 关联
   }
   let fileCount = 0, totalSize = 0;
   const dirJobs = [];
@@ -328,13 +438,13 @@ async function summarizeTree(p, visited, depth, acc) {
   for (const e of dirents) {
     if (e.name === VOLUME_MARKER) continue; // 跳过磁盘身份标记文件
     if (e.isDirectory()) {
-      dirJobs.push(summarizeTree(path.join(p, e.name), visited, depth + 1, acc));
+      dirJobs.push(summarizeTree(path.join(p, e.name), visited, depth + 1, acc, realpathSums));
     } else if (e.isSymbolicLink()) {
       // 符号链接：先判定是否指向目录，再决定是否下钻（避免对文件链接误判）。
       dirJobs.push((async () => {
         try {
           if ((await fs.promises.stat(path.join(p, e.name))).isDirectory()) {
-            return summarizeTree(path.join(p, e.name), visited, depth + 1, acc);
+            return summarizeTree(path.join(p, e.name), visited, depth + 1, acc, realpathSums);
           }
         } catch (_) { /* 不可达，按 0 处理 */ }
         return { fileCount: 0, totalSize: 0 };
@@ -350,10 +460,12 @@ async function summarizeTree(p, visited, depth, acc) {
   const [subs, extraSizes] = await Promise.all([Promise.all(dirJobs), Promise.all(fileSizeJobs)]);
   for (const s of subs) { fileCount += s.fileCount; totalSize += s.totalSize; }
   for (const s of extraSizes) totalSize += s;
-  // 记录「当前目录」自身的递归汇总（含直接文件 + 全部后代）。
-  if (acc && p) acc.set(p, { fileCount, totalSize });
+  // 原地更新占位对象（所有复用方通过引用同步拿到最终值），并按原始路径记录。
+  summary.fileCount = fileCount;
+  summary.totalSize = totalSize;
+  if (acc && p) acc.set(p, summary);
   visited.delete(rp);
-  return { fileCount, totalSize };
+  return summary;
 }
 
 /* ---------------- request router ---------------- */
@@ -363,12 +475,30 @@ const server = http.createServer((req, res) => {
 
   // ---- API routes (local only) ----
   if (urlPath === '/api/drives') {
-    try {
-      // computerId 用于区分多台电脑生成的清单；默认用主机名，失败则回退时间戳。
-      sendJSON(res, 200, { computerId: getComputerId(), drives: listDrives() });
-    } catch (err) {
+    // 异步列举（含安全的 A–Z 探测与逐盘超时），期间不阻塞服务器响应其它请求。
+    listDrives().then((drives) => {
+      sendJSON(res, 200, { computerId: getComputerId(), drives });
+    }).catch((err) => {
       sendJSON(res, 500, { error: err.message });
-    }
+    });
+    return;
+  }
+  // 惰性写入磁盘根身份标记文件（跨主机一致的稳定 volumeId）。只在真正纳入清单的盘上调用，
+  // 异步、best-effort、带超时，绝不阻塞列举/启动。无副作用的读取见 /api/drives（readVolumeId）。
+  if (urlPath === '/api/volume-id' && req.method === 'POST') {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      (async () => {
+        try {
+          const p = JSON.parse(body || '{}').path;
+          const vid = await ensureVolumeIdAsync(p);
+          sendJSON(res, 200, { volumeId: vid });
+        } catch (e) {
+          sendJSON(res, 500, { error: e.message });
+        }
+      })();
+    });
     return;
   }
   if (urlPath === '/api/version') {
@@ -420,6 +550,23 @@ const server = http.createServer((req, res) => {
     })();
     return;
   }
+  if (urlPath === '/api/tree') {
+    const u = new URL(req.url, 'http://localhost');
+    const p = u.searchParams.get('path');
+    if (!p) { sendJSON(res, 400, { error: 'missing path' }); return; }
+    // files=1 时叶子目录下也带回文件节点；默认只返回目录（契合「含子目录」语义）。
+    const withFiles = u.searchParams.get('files') === '1';
+    (async () => {
+      try {
+        const tree = await buildTree(p, new Set(), 0, withFiles);
+        if (!tree) { sendJSON(res, 404, { error: 'unreadable', message: p }); return; }
+        sendJSON(res, 200, { path: p, tree });
+      } catch (err) {
+        sendJSON(res, 404, { error: err.code || 'error', message: err.message });
+      }
+    })();
+    return;
+  }
   if (urlPath === '/api/summary') {
     const u = new URL(req.url, 'http://localhost');
     // 支持多 path（?path=A&path=B&path=C）：前端只把「被选中的目录」作为扫描根传入，
@@ -429,8 +576,9 @@ const server = http.createServer((req, res) => {
     (async () => {
       try {
         const acc = new Map();
+        const realpathSums = new Map(); // 跨根共享：相同物理目录只统计一次
         for (const p of paths) {
-          try { await summarizeTree(p, new Set(), 0, acc); }
+          try { await summarizeTree(p, new Set(), 0, acc, realpathSums); }
           catch (_) { /* 单个根扫描失败不影响其他根 */ }
         }
         const summaries = {};
