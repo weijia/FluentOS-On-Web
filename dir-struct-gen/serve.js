@@ -544,6 +544,35 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // 批量取一组路径的「最后修改时间」(mtime)，供前端生成清单时给每个写进清单的
+  // 文件/目录节点补上各自的 mtime——与目录大小(聚合值、按需预取)不同，mtime 是
+  // 单个节点的物理属性，故在生成完清单树后一次性批量取，不拖慢日常浏览。
+  // 入参：POST JSON { paths: ["C:\\a","C:\\b\\c.txt",...] }；返回 { "<path>": <mtimeMs>, ... }。
+  // 取不到（权限/不存在）的路径不在结果中出现，前端据此该节点不带 mtime（不写假值）。
+  if (urlPath === '/api/mtimes' && req.method === 'POST') {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      (async () => {
+        try {
+          const obj = JSON.parse(body || '{}');
+          const paths = Array.isArray(obj.paths) ? obj.paths.filter((p) => typeof p === 'string' && p) : [];
+          const result = {};
+          await Promise.all(paths.map(async (p) => {
+            try {
+              const st = await fs.promises.stat(p);
+              result[p] = st.mtime.getTime(); // 毫秒级 epoch，与清单里 updatedAt 同一口径
+            } catch (_) { /* 取不到：不写，前端据此该节点无 mtime */ }
+          }));
+          sendJSON(res, 200, result);
+        } catch (e) {
+          sendJSON(res, 400, { error: e.message });
+        }
+      })();
+    });
+    return;
+  }
+
   // ---- static files ----
   let staticPath = urlPath === '/' ? '/index.html' : urlPath;
   const filePath = path.join(ROOT, staticPath);

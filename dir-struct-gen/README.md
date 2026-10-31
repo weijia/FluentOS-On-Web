@@ -29,9 +29,9 @@
   "generatedAt": "2026-10-24T12:00:00.000Z",
   "generator": "fluentos-dir-struct-gen",
   "source": "<computerId>",
-  "root": { "name": "<computerId>", "type": "folder", "children": [ { "name": "C:", "type": "folder", "fileCount": 1280, "totalSize": 524288000, "totalSizeOnDisk": 536870912, "children": [
-    { "name": "Projects", "type": "folder", "tags": ["git", "node"], "fileCount": 42, "totalSize": 1234567, "totalSizeOnDisk": 1236992, "children": [
-      { "name": "README.md", "type": "file", "size": 2048, "sizeOnDisk": 4096 }
+  "root": { "name": "<computerId>", "type": "folder", "children": [ { "name": "C:", "type": "folder", "fileCount": 1280, "totalSize": 524288000, "totalSizeOnDisk": 536870912, "mtime": 1761907200000, "children": [
+    { "name": "Projects", "type": "folder", "tags": ["git", "node"], "fileCount": 42, "totalSize": 1234567, "totalSizeOnDisk": 1236992, "mtime": 1761810800000, "children": [
+      { "name": "README.md", "type": "file", "size": 2048, "sizeOnDisk": 4096, "mtime": 1761800000000 }
     ] }
   ] } ] }
 }
@@ -42,26 +42,26 @@
 > - `tags` 为可选字段：自动标签（后端探测）与手动标签合并去重后写入，便于读取侧按标签筛选/展示；无标签时不出现该字段。
 > - `fileCount` / `totalSize` / `totalSizeOnDisk` 为可选字段（开启「汇总文件数与大小」后出现）：分别表示该目录**整棵物理子树**中的文件总数、文件**逻辑大小**之和、文件**占用磁盘空间**之和，便于读取侧快速展示「这个目录有多大、多少文件」而无需递归下钻。**凡进入清单的目录都会带上**（含半选目录）；数值**不随子项是否被单独勾选 / 展示而变**，因此常常大于它在清单里的可见子项之和。子树里有读不到或超出深度上限的部分时，另带 `sizePartial: true`（下界标记）。未开启开关时这几个字段缺省。
 > - 文件叶子（`type:"file"`）同样给两个数值：`size`（该文件的逻辑大小）与 `sizeOnDisk`（该文件的占用磁盘空间）。**取不到「占用」时按其逻辑大小替代**（POSIX 由 `st_blocks` × 512 取得占用；Windows 下 Node 不提供该字段，那里 `sizeOnDisk` 会等于 `size`）；两个数值都取不到时字段缺省，不写假 0。
+> - **每个写进清单的文件/目录节点都带 `mtime`**（**毫秒级 Unix epoch**，UTC），即该文件/目录自身的「最后修改时间」（`fs.stat` 的 `mtime`）。这是节点的物理属性，与是否勾选子项无关，故**不依赖**「汇总文件数与大小」开关——只要该节点进入清单（目录：checked/indeterminate；文件：含子目录展开或「包含文件」且选中）就会带上；取不到（权限/不存在）的节点不带该字段，不写假值。后端由 `POST /api/mtimes` 在生成时按实际写入的节点批量取回，不拖慢日常浏览。合并时 `mtime` 随所属节点整体保留（冲突按规则 2 的 `updatedAt` 取新一侧的节点，其 `mtime` 一并保留）。
 
 ## 预览与上传的格式（v2 拆分）
 
 页面右侧预览、以及上传到 RemoteStorage 的内容采用**同一套 v2 拆分格式**，确保「所见即所传」：
 
-- **主机索引** `<清单文件名>.json`（`version: 2`）：只记录本机挂了哪些盘、盘符、稳定身份（volumeId），以及该卷已知的**全部分片**，不含目录树。
+- **主机索引** `<清单文件名>.json`（`version: 2`）：**只包含每卷的 `volumeId` 与该卷累积的「全部分片文件名」（`files`），不含目录树、不含盘符/主机等其他字段**。
   ```json
-  { "version": 2, "source": "<computerId>", "mounts": [
-    { "letter": "C:", "volumeId": "A401-6B8F", "file": "A401-6B8F",
-      "files": [ { "file": "A401-6B8F.LAPTOP-A", "partId": "LAPTOP-A" },
-                 { "file": "A401-6B8F.LAPTOP-B", "partId": "LAPTOP-B" } ] },
-    { "letter": "O:", "volumeId": null, "file": "HOST__O_.HOST", "files": [ { "file": "HOST__O_.HOST", "partId": "HOST" } ] }
+  { "version": 2, "source": "<computerId>", "generatedAt": "2026-10-31T22:00:00.000Z", "generator": "fluentos-dir-struct-gen", "mounts": [
+    { "volumeId": "A401-6B8F", "files": [ "A401-6B8F.1761907200000", "A401-6B8F.1761993600000" ] },
+    { "volumeId": null, "files": [ "HOST__O_.HOST.1761907200000" ] }
   ] }
   ```
-- **卷文件分片** `<volumeKey>.<partId>.json`（**每台主机一份**，含该盘在本机勾选出的目录树）：
+  - `mounts[].volumeId` = 该卷的稳定身份（`磁盘根 .dir-struct-id`，取不到则为 `null`）；`mounts[].files` = 该卷**全部**分片文件的基名（不含 `.json`），含本次新生成的与远端已存在的旧分片——读取侧据此把同一卷所有分片合并成一棵树。
+- **卷文件分片** `<volumeId>.<createdAt>.json`（`createdAt` = 本次生成的毫秒时间戳；含该盘在本机勾选出的目录树）：
   `{ volumeId, name, type:"folder", part:{ id, revision, generatedAt }, children:[…], sources:[<computerId>] }`。
-  - `partId` 默认本机 ID（主机名，安全化后）；`part.revision` 每次成功上传 +1（本机记录）；`part.generatedAt` 为毫秒级 epoch。
-  - 同一块盘因此可以有多份文件：每台主机写自己的一份、**互不覆盖**；上传只 `PUT` 自己的分片，不再「读别人的文件 → 合并 → 写回同一文件」，多机同时上传也不会丢更新。
-  - 早期版本写入的单文件 `<volumeKey>.json` 仍被识别，会与各分片一起被读取侧合并，无需手工迁移。
-- `mounts[].file` = 主文件（不含 `.json` 的基名）：优先旧版单文件，否则取该卷分片里字典序第一份——供尚未支持 `files` 的读取侧兜底。
+  - 文件名以 **volumeId + 生成时间戳** 构成，**每次生成都是新文件名，绝不覆盖以前生成的文件**——同一卷因此累积多份「历史快照」。
+  - `part.id` 默认本机 ID（主机名，安全化后），仅用于多机合并时的 tie-break，`part.revision` 每次成功上传 +1（本机记录），`part.generatedAt` 为毫秒级 epoch（与文件名里的时间戳一致）。
+  - 上传只 `PUT` 自己本次的分片（新文件名），不再「读别人的文件 → 合并 → 写回同一文件」，多机/多次上传都不会丢更新、也不会互相覆盖。
+  - 盘符信息不进主机索引：读取侧用卷文件内部的 `name`（盘符）与 `volumeId` 还原驱动节点，按 volumeId 归组合并。
 
 预览区按上述文件逐个展示为独立窗口（主机索引标记为蓝色卡片，卷文件卡片标题带 `partId`），「下载 ZIP」会把它们打包成一组文件，解压后**与上传到 RS 的完全一致**。
 

@@ -6,8 +6,9 @@
  * 目录采用懒加载：点开某层才向服务器请求下一层。
  *
  * v2 拆分（主机索引 + 卷文件）：同一块盘（volume）允许存在多份目录结构文件——
- * 每台主机各写一份「分片」`<volumeKey>.<partId>.json`（内容带 part{id,revision,generatedAt}），
- * 互不覆盖；读取时按 volumeId 归组、按确定性规则合并（见 mergeVolumeTrees）。
+ * 每次生成都写一份「分片」`<volumeKey>.<createdAt>.json`（createdAt = 毫秒时间戳；内容带
+ * part{id,revision,generatedAt}），旧分片文件名各不相同、互不覆盖，同一卷因此累积多份历史快照；
+ * 主机索引只记录每卷的 volumeId 与全部分片文件名（files），读取时按 volumeId 归组、按确定性规则合并。
  * 节点级 updatedAt 为毫秒级 Unix epoch，供合并时「按时间取新」判定。
  */
 
@@ -806,6 +807,9 @@ async function generateManifest(genAt) {
     await fetchAllSummaries(roots.map(r => r.path));
   }
   const rootManifest = await buildManifestAsync(state.root, includeFiles, ctx);
+  // 给每个写进清单的文件/目录补上各自的「最后修改时间」(mtime)：在清单树生成完之后，
+  // 按实际写入的节点批量向后端取，覆盖含子目录已展开的子树，且不拖慢日常浏览。
+  await attachMtimes(rootManifest, includeFiles);
   return {
     version: 1,
     generatedAt: genAt || new Date().toISOString(),
@@ -813,6 +817,66 @@ async function generateManifest(genAt) {
     source: state.root.name,
     root: rootManifest,
   };
+}
+
+// 把文件/目录的「最后修改时间」(mtime, 毫秒 epoch) 批量挂到清单节点上。
+// 与目录大小(聚合值、按需预取)不同，mtime 是「单个节点的物理属性」：在清单树生成完之后，
+// 按「实际写进清单的节点」一次性向后端批量取（含含子目录已展开的子树），保证 JSON 里每个
+// 文件/目录都带自己的 mtime，且不拖慢日常浏览（浏览时完全不取 mtime）。
+// 与 buildManifestAsync 同口径：目录节点在 checked/indeterminate 时写入并下钻；文件节点在
+// 「包含文件」且 checked 时写入。仅这些节点会被取 mtime。
+async function attachMtimes(rootManifest, includeFiles) {
+  // 1) 收集「清单节点 ↔ 内存树节点」配对（以 name 对齐，避免顺序错位），只含真正写进清单的节点。
+  const pairs = [];
+  (function walk(treeNode, manifestNode) {
+    if (!treeNode || !manifestNode) return;
+    pairs.push([treeNode, manifestNode]);
+    const mcByName = new Map((manifestNode.children || []).map((m) => [m.name, m]));
+    for (const c of (treeNode.children || [])) {
+      const mn = mcByName.get(c.name);
+      if (!mn) continue;
+      if (c.kind === 'dir') {
+        if (c.checked || c.indeterminate) walk(c, mn);
+      } else if (includeFiles && c.checked) {
+        pairs.push([c, mn]);
+      }
+    }
+  })(state.root, rootManifest);
+
+  // 2) 取所有有磁盘路径的节点，分批并发请求 mtime（避免一次性几万个 stat 压垮 libuv）。
+  const paths = pairs.map((t) => t[0].path).filter(Boolean);
+  if (!paths.length) return;
+  const CHUNK = 2000;        // 每批路径数
+  const CONCURRENCY = 6;     // 并发批数
+  const map = {};
+  let idx = 0;
+  async function worker() {
+    while (idx < paths.length) {
+      const start = idx;
+      idx += CHUNK;
+      const slice = paths.slice(start, idx);
+      try {
+        const res = await fetch('/api/mtimes', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ paths: slice }),
+        });
+        if (!res.ok) continue;
+        const part = await res.json();
+        for (const k in part) map[k] = part[k];
+      } catch (_) { /* 单批失败不影响其它批 */ }
+    }
+  }
+  const batches = Math.ceil(paths.length / CHUNK);
+  const workers = [];
+  for (let i = 0; i < Math.min(CONCURRENCY, batches); i++) workers.push(worker());
+  await Promise.all(workers);
+
+  // 3) 回写 mtime 到清单节点（仅当后端确实返回数值时才写，不写假值）。
+  for (const [t, mn] of pairs) {
+    const m = map[t.path];
+    if (typeof m === 'number') mn.mtime = m;
+  }
 }
 
 // 预览生成做防抖：勾选级联 / 连续展开会在 250ms 内多次调用，合并为一次真实生成，
@@ -858,29 +922,25 @@ async function doRegenerate(genAt) {
 }
 
 // 由完整 manifest(version:1) 构建 v2 拆分的「上传载荷」——预览与上传共用同一份，确保两者一致。
-// 每块盘写一份本机分片 <volumeKey>.<partId>.json（不再读改写别人的同名文件），主机索引的
-// mounts 同时携带 file（主文件，兼容尚未支持 files 的读取侧）与 files（同一卷的全部分片）。
+// 每块盘写一份「分片」：文件名 = <volumeKey>.<createdAt>.json（createdAt = 本次生成的毫秒时间戳）。
+// 每次生成都带全新时间戳，因此上传不会覆盖以前生成的文件——同一卷会累积多份历史分片，
+// 主机索引的 mounts 只记录该卷的 volumeId 与全部分片文件名（files），供读取侧按 volumeId 合并成一棵树。
 // 返回 { hostIndex: {name, json}, volumes: [{key, base, name, json}] }。
 function buildV2Payload(manifest, file) {
   const drives = (manifest.root.children || []).filter((d) => d.type === 'folder');
-  const partId = partIdFor();
+  const createdAt = Date.now();                  // 本次生成的时间戳：同一卷每次生成一个全新分片文件名，互不覆盖
+  const partId = partIdFor();                    // 本机身份（用于分片 part.id 与合并 tie-break，不参与文件名）
   const mounts = [];
   const volumes = drives.map((d) => {
-    const indexKey = volumeKeyFor(d);              // 卷索引键（原始，未脱敏）
-    const volumeKey = sanitizeKey(indexKey);       // RemoteStorage 文件名安全键
-    const ownBase = shardBaseName(volumeKey, partId);
-    const bases = volumeShardBases(indexKey, ownBase);
-    // 主文件：优先旧版单文件 <volumeKey>.json（若远端还有），否则取字典序第一份分片——
-    // file 的语义与旧版一致（一个不带 .json 的基名），供旧读取侧兜底。
-    const primary = bases.indexOf(volumeKey) >= 0 ? volumeKey : bases[0];
+    const indexKey = volumeKeyFor(d);             // 卷索引键（原始，未脱敏）
+    const volumeKey = sanitizeKey(indexKey);      // RemoteStorage 文件名安全键（= 卷分片文件名前缀）
+    const ownBase = shardBaseName(volumeKey, createdAt);
+    const bases = volumeShardBases(indexKey, ownBase); // 该卷全部分片基名（远端已存在的 + 本次自己的）
+    // 主机索引只记录「卷身份 + 全部分片文件名」：volumeId 是稳定身份，files 是该卷累积的全部分片。
+    // 读取侧据此把同一卷的所有分片（含历史）合并成一棵树，且不依赖任何主机/盘符信息。
     mounts.push({
-      letter: d.name,
       volumeId: d.volumeId || null,
-      file: primary,
-      files: bases.map((b) => ({
-        file: b,
-        partId: b === volumeKey ? null : b.slice(volumeKey.length + 1),
-      })),
+      files: bases,
     });
     const json = {
       volumeId: d.volumeId || null,
@@ -890,7 +950,7 @@ function buildV2Payload(manifest, file) {
       part: {
         id: partId,
         revision: revisionFor(revisionKey(volumeKey, partId)),
-        generatedAt: Date.now(),
+        generatedAt: createdAt,
       },
       children: d.children,
       sources: [manifest.source],
@@ -1202,7 +1262,7 @@ async function applyDeepenMarks(clear = true) {
 
 /* ---------------- v2 分片：命名、发现与合并 ----------------
  * 同一块盘（volume）允许存在多份目录结构文件：每台主机写自己的一份「分片」
- * （<volumeKey>.<partId>.json，内容带 part{id,revision,generatedAt}），互不覆盖，
+ * （<volumeId>.<createdAt>.json，内容带 part{id,revision,generatedAt}），互不覆盖，
  * 读取时按 volumeId 归组后合并成一棵树。
  * 合并规则（确定性、幂等）：
  *   1) children 永远取并集——某台机没扫到不代表目录不存在，绝不因为「另一份更新」而抹掉别人的目录；
@@ -1406,9 +1466,10 @@ function partIdFor() {
   return sanitizeKey(state.computerId || 'host');
 }
 
-// 分片基名（不含 .json）：<volumeKey>.<partId>；partId 为空时退化为旧版单文件 <volumeKey>。
-function shardBaseName(volumeKey, partId) {
-  return partId ? volumeKey + '.' + partId : volumeKey;
+// 分片基名（不含 .json）：<volumeKey>.<createdAt>；createdAt 为本次生成的毫秒时间戳，
+// 保证每次生成得到不同文件名、不覆盖以前的分片（同一卷累积多份历史快照）。
+function shardBaseName(volumeKey, createdAt) {
+  return volumeKey + '.' + createdAt;
 }
 
 // 该卷的全部已知分片基名（稳定排序）：远端列举 / 加载到的记入 state.shardIndex，本轮自己的分片始终并入。
@@ -1525,7 +1586,7 @@ async function uploadToRS() {
     const payload = buildV2Payload(manifest, file);
     await saveSettings(); // 记住已知分片，刷新后预览仍能列出同一卷的全部分片
 
-    // 4) 只写自己的分片（<volumeKey>.<partId>.json）：不再「读别人的文件 → 合并 → 写回同一文件」，
+    // 4) 只写自己本次的分片（<volumeId>.<createdAt>.json，全新文件名）：不再「读别人的文件 → 合并 → 写回同一文件」，
     //    因此多台主机同时上传也不会互相覆盖、丢更新；完整目录树由读取侧按 volumeId 合并得到。
     const headers = { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' };
     let uploaded = 0;
