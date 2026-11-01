@@ -23297,7 +23297,7 @@ var ZenFSConfigUI = (() => {
     }
   });
 
-  // node_modules/zen-fs-config/dist/chunk-6OS2F54Z.mjs
+  // node_modules/zen-fs-config/dist/chunk-M4QTPI6O.mjs
   function registerBackend(type, factory, metadata) {
     registry.set(type, factory);
     if (metadata) {
@@ -23467,8 +23467,8 @@ var ZenFSConfigUI = (() => {
     }
   }
   var registry, metadataRegistry, inMemoryCounter, _memCache, OPTIONAL_BACKEND_GLOBALS;
-  var init_chunk_6OS2F54Z = __esm({
-    "node_modules/zen-fs-config/dist/chunk-6OS2F54Z.mjs"() {
+  var init_chunk_M4QTPI6O = __esm({
+    "node_modules/zen-fs-config/dist/chunk-M4QTPI6O.mjs"() {
       "use strict";
       registry = /* @__PURE__ */ new Map();
       metadataRegistry = /* @__PURE__ */ new Map();
@@ -23514,7 +23514,8 @@ var ZenFSConfigUI = (() => {
         // third-party Gitee widget) would shadow the real backend and break mounting
         // with "Invalid mount configuration".
         "zen-fs-gitee": ["ZenFSGitee"],
-        "zen-fs-remotestoragejs": ["ZenFSRemoteStorage", "RemoteStorageFileSystem"]
+        "zen-fs-remotestoragejs": ["ZenFSRemoteStorage", "RemoteStorageFileSystem"],
+        "zen-fs-webdav": ["ZenFSWebDAV"]
       };
       registerBackend("GitHub", async (options) => {
         const _gh = await importOptionalBackend("zen-fs-github");
@@ -23576,9 +23577,9 @@ var ZenFSConfigUI = (() => {
       registerBackend("Gitee", async (options) => {
         const _gt = await importOptionalBackend("zen-fs-gitee");
         const Gitee = _gt?.Gitee ?? _gt?.default;
-        if (typeof Gitee !== "function") {
+        if (!Gitee || typeof Gitee !== "function" && typeof Gitee.create !== "function") {
           throw new Error(
-            `Backend package "zen-fs-gitee" loaded, but its Gitee export is not a constructor (typeof=${typeof Gitee}). Load its UMD bundle so it exposes the global "ZenFSGitee".`
+            `Backend package "zen-fs-gitee" loaded, but its Gitee export is not a usable backend (typeof=${typeof Gitee}). Load its UMD bundle so it exposes the global "ZenFSGitee".`
           );
         }
         return wrapZenFSFileSystem({
@@ -23636,6 +23637,53 @@ var ZenFSConfigUI = (() => {
         // connections to the same endpoint with different tuning are deduplicated.
         identityFields: ["href", "token", "basePath"]
       });
+      registerBackend("WebDAV", async (options) => {
+        const _dav = await importOptionalBackend("zen-fs-webdav");
+        const SyncableWebDAVFS = _dav?.SyncableWebDAVFS ?? _dav?.default?.SyncableWebDAVFS ?? globalThis.ZenFSWebDAV?.SyncableWebDAVFS;
+        if (typeof SyncableWebDAVFS !== "function") {
+          throw new Error(
+            `Backend package "zen-fs-webdav" loaded, but its SyncableWebDAVFS export is not a constructor (typeof=${typeof SyncableWebDAVFS}). Run: npm install zen-fs-webdav, or load its UMD bundle via <script src=".../zen-fs-webdav.global.js"> so it exposes the global "ZenFSWebDAV".`
+          );
+        }
+        const instance = new SyncableWebDAVFS({
+          baseUrl: options.baseUrl,
+          username: options.username,
+          password: options.password,
+          token: options.token,
+          headers: options.headers,
+          timeout: options.timeout,
+          preciseMtime: true
+        });
+        if (options.purgeLegacyMtime === true) {
+          try {
+            await instance.purgeLegacyMtimeSidecars({ root: options.basePath ?? "/" });
+          } catch {
+          }
+        }
+        return instance;
+      }, {
+        type: "WebDAV",
+        label: "WebDAV",
+        icon: "\u2601\uFE0F",
+        fields: [
+          { key: "baseUrl", label: "Base URL", type: "text", placeholder: "https://dav.example.com/remote.php/dav/files/user/", required: true },
+          { key: "username", label: "Username", type: "text", placeholder: "admin" },
+          { key: "password", label: "Password", type: "password" },
+          { key: "token", label: "Token", type: "password", placeholder: "Bearer token (optional)" },
+          { key: "basePath", label: "Base Path", type: "text", placeholder: "/zen-fs-config/" },
+          { key: "purgeLegacyMtime", label: "Purge legacy .mtime sidecars", type: "select", options: [
+            { value: "false", label: "no (default)" },
+            { value: "true", label: "yes (one-time migration)" }
+          ] }
+        ],
+        defaultOptions: { baseUrl: "", username: "", password: "", token: "", basePath: "/", purgeLegacyMtime: "false" },
+        // accountFields: credentials live on the endpoint, so a data-sync group can
+        // reuse them from an already-connected config-sync WebDAV backend.
+        accountFields: ["username", "password", "token"],
+        // identity = the WebDAV endpoint. Credentials are auth, not location, so two
+        // connections to the same URL are deduplicated as one replica.
+        identityFields: ["baseUrl"]
+      });
     }
   });
 
@@ -23669,9 +23717,9 @@ var ZenFSConfigUI = (() => {
     }
   });
 
-  // node_modules/zen-fs-config/dist/backend-registry-3FVPYPZL.mjs
-  var backend_registry_3FVPYPZL_exports = {};
-  __export(backend_registry_3FVPYPZL_exports, {
+  // node_modules/zen-fs-config/dist/backend-registry-XFOWB3ZB.mjs
+  var backend_registry_XFOWB3ZB_exports = {};
+  __export(backend_registry_XFOWB3ZB_exports, {
     createBackend: () => createBackend,
     getAccountFields: () => getAccountFields,
     getBackendMetadata: () => getBackendMetadata,
@@ -23683,10 +23731,10 @@ var ZenFSConfigUI = (() => {
     unregisterBackend: () => unregisterBackend,
     wrapZenFSFileSystem: () => wrapZenFSFileSystem
   });
-  var init_backend_registry_3FVPYPZL = __esm({
-    "node_modules/zen-fs-config/dist/backend-registry-3FVPYPZL.mjs"() {
+  var init_backend_registry_XFOWB3ZB = __esm({
+    "node_modules/zen-fs-config/dist/backend-registry-XFOWB3ZB.mjs"() {
       "use strict";
-      init_chunk_6OS2F54Z();
+      init_chunk_M4QTPI6O();
     }
   });
 
@@ -24193,7 +24241,7 @@ var ZenFSConfigUI = (() => {
   });
 
   // node_modules/zen-fs-config/dist/index.mjs
-  init_chunk_6OS2F54Z();
+  init_chunk_M4QTPI6O();
 
   // node_modules/@richard432/localstorage-logger/dist/index.mjs
   var PREFIX = "debug:";
@@ -25779,7 +25827,7 @@ var ZenFSConfigUI = (() => {
         const pathMod = await Promise.resolve().then(() => (init_stub_path(), stub_path_exports));
         const dir = options.path;
         const store = new FolderStore({ path: dir, label: options.label, fs, pathMod });
-        return (await Promise.resolve().then(() => (init_backend_registry_3FVPYPZL(), backend_registry_3FVPYPZL_exports))).wrapZenFSFileSystem({ backend: FolderBackend, path: dir, label: options.label });
+        return (await Promise.resolve().then(() => (init_backend_registry_XFOWB3ZB(), backend_registry_XFOWB3ZB_exports))).wrapZenFSFileSystem({ backend: FolderBackend, path: dir, label: options.label });
       },
       {
         type: "Folder",

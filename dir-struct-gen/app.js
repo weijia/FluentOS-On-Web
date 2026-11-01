@@ -23,15 +23,32 @@ const state = {
 };
 
 // 已连接的「app-data 数据同步组」文件系统（zen-fs）。由同步组配置组件（zen-fs-config-ui）
-// 连接后注入；清单与深挖标记都写入它的根。该组的 RemoteStorage 后端 basePath 固定为
-// app_data/folders/，故实际落点为 app_data/folders/struct/... 与 app_data/folders/folder-deepen/...，
-// 与之前直连 RemoteStorage 的位置逐字节一致。
+// 连接后注入；清单与深挖标记都写入它的根。远端后端可为 RemoteStorage 或 Gitee 等：
+// RemoteStorage 后端 basePath 固定 app_data/folders/，根即 app_data/folders/；Gitee 等后端
+// 根为仓库根，写入路径统一加 app_data/folders 前缀（见 MANIFEST_ROOT），落点与 RemoteStorage 逐字节一致。
 let appFs = null;
-// 是否真有 RemoteStorage 后端（首启本地-only 的 data-sync 组无远端，不允许上传）。
+// 是否真有远端后端（首启本地-only 的 data-sync 组无远端，不允许上传）。
 let appFsRemoteReady = false;
 // app-data 数据组的 RemoteStorage 后端固定基路径：确保清单 / 深挖标记落到
 // 与历史直连 RemoteStorage 完全相同的目录（app_data/folders/）。
 const ZF_BASE = 'app_data/folders/';
+// 清单落点的「仓库内前缀」：
+// - RemoteStorage 后端：basePath 已把数据组根定位到 app_data/folders/，故前缀为空；
+// - Gitee 等其它远端后端：数据组根即仓库根，需手动在路径前加 app_data/folders，
+//   使清单落点与 RemoteStorage 逐字节一致（onenav 默认 base=app_data/folders 通用）。
+let MANIFEST_ROOT = '';
+// 拼接清单路径：p 形如 'struct/x.json' / 'folder-deepen/x.json' / 'struct'。
+function mfPath(p) {
+  return MANIFEST_ROOT ? '/' + MANIFEST_ROOT + '/' + p : '/' + p;
+}
+// 排除本地-only 后端，返回真正的远端后端类型列表。
+function remoteBackendTypes(backends) {
+  return (backends || []).filter((b) => b.type !== 'InMemory' && b.type !== 'IndexedDB').map((b) => b.type);
+}
+// 根据数据组实际远端后端类型推导 MANIFEST_ROOT（RemoteStorage → 空；其余 → app_data/folders）。
+function manifestRootFor(types) {
+  return types.includes('RemoteStorage') ? '' : 'app_data/folders';
+}
 // 同步组配置组件使用的 appId：同一 appId 下复用 zen-fs-config 的本地配置仓拓扑。
 const ZF_APP_ID = 'dir-struct-gen';
 
@@ -1178,14 +1195,12 @@ function volumeKeyFor(drive) {
   return drive.volumeId || (state.computerId + '::' + drive.name);
 }
 
-// 读取某块盘的深挖标记（数据组根下的 folder-deepen/<key>.json）。
-// 数据组的 RemoteStorage 后端 basePath = app_data/folders/，故实际落点为
-// app_data/folders/folder-deepen/<key>.json，与历史直连 RemoteStorage 一致。
+// 读取某块盘的深挖标记（数据组下的 folder-deepen/<key>.json）。
 async function loadDeepenMarks(key) {
   if (!appFs) return [];
   try {
     const fp = appFs.promises || appFs;
-    const raw = await fp.readFile('/folder-deepen/' + sanitizeKey(key) + '.json', 'utf-8');
+    const raw = await fp.readFile(mfPath('folder-deepen/') + sanitizeKey(key) + '.json', 'utf-8');
     const text = typeof raw === 'string' ? raw : new TextDecoder().decode(raw);
     const obj = JSON.parse(text);
     const marks = obj && Array.isArray(obj.marks) ? obj.marks : [];
@@ -1197,9 +1212,9 @@ async function loadDeepenMarks(key) {
 async function clearDeepenMarks(key) {
   if (!appFs) return;
   try {
-    await ensureDir('/folder-deepen');
+    await ensureDir(mfPath('folder-deepen'));
     const fp = fsPromises();
-    await fp.writeFile('/folder-deepen/' + sanitizeKey(key) + '.json', JSON.stringify({ marks: [] }));
+    await fp.writeFile(mfPath('folder-deepen/') + sanitizeKey(key) + '.json', JSON.stringify({ marks: [] }));
   } catch (_) { /* 清理失败不阻断 */ }
 }
 
@@ -1534,7 +1549,7 @@ async function listRemoteFiles() {
   if (!appFs) return [];
   try {
     const fp = appFs.promises || appFs;
-    const names = await fp.readdir('/struct');
+    const names = await fp.readdir(mfPath('struct'));
     return (names || []).filter((k) => typeof k === 'string' && !k.endsWith('/'));
   } catch (_) { return []; }
 }
@@ -1551,7 +1566,7 @@ function collectShardsFor(indexKey, volumeKey, names) {
 async function uploadToRS() {
   if (!state.root) { setRS('请先生成清单。', false); return; }
   if (!appFsRemoteReady) {
-    setRS('请先在上方「后端 / 数据同步组」配置 RemoteStorage 后端，并等待同步组就绪。', false);
+    setRS('请先在上方「后端 / 数据同步组」配置远端后端（RemoteStorage / Gitee 等），并等待同步组就绪。', false);
     return;
   }
 
@@ -1580,12 +1595,12 @@ async function uploadToRS() {
 
     // 4) 只写自己本次的分片（<volumeId>.<createdAt>.json，全新文件名）：不再「读别人的文件 → 合并 → 写回同一文件」，
     //    因此多台主机同时上传也不会互相覆盖、丢更新；完整目录树由读取侧按 volumeId 合并得到。
-    await ensureDir('/struct');
+    await ensureDir(mfPath('struct'));
     const fp = fsPromises();
     let uploaded = 0;
     const revs = [];
     for (const vol of payload.volumes) {
-      await fp.writeFile('/struct/' + vol.name, JSON.stringify(vol.json, null, 2));
+      await fp.writeFile(mfPath('struct/') + vol.name, JSON.stringify(vol.json, null, 2));
       uploaded++;
       rememberShard(vol.key, vol.base);
       revs.push([
@@ -1595,7 +1610,7 @@ async function uploadToRS() {
     }
 
     // 5) 上传主机索引（文件名 = <computerId>.json）。
-    await fp.writeFile('/struct/' + payload.hostIndex.name, JSON.stringify(payload.hostIndex.json, null, 2));
+    await fp.writeFile(mfPath('struct/') + payload.hostIndex.name, JSON.stringify(payload.hostIndex.json, null, 2));
 
     // 6) 上传成功后落盘分片版本号（下次生成时 +1），并持久化已知分片清单。
     for (const [k, r] of revs) setRevision(k, r);
@@ -1629,10 +1644,10 @@ async function ensureDir(dir) {
   try { await fp.mkdir(dir, { recursive: true }); } catch (_) { /* 已存在或无 mkdir */ }
 }
 
-// 从「已连接」事件拿到 app-data 数据组的 fs，并按分支确保 RemoteStorage 后端：
-//  - data-sync：直接使用连好的数据组 fs（其后端即 RemoteStorage）。
-//  - config-sync：自动建立 app-data 数据组，并把同步后端设为 RemoteStorage
-//    （复用用户刚配置的账号 href/token，basePath 固定 app_data/folders/）。
+// 从「已连接」事件拿到 app-data 数据组的 fs，并按分支确保远端后端：
+//  - data-sync：直接使用连好的数据组 fs（其后端即 RemoteStorage / Gitee 等远端）。
+//  - config-sync：自动建立 app-data 数据组，并把同步后端设为与「配置仓库已登记的远端后端」
+//    同类型（复用其 options；RemoteStorage 固定 basePath=app_data/folders/）。
 // 首启本地-only 的 data-sync 组（无远端后端）则 appFsRemoteReady=false，不允许上传。
 async function ensureAppDataFs(detail) {
   const d = detail || (typeof document !== 'undefined'
@@ -1642,13 +1657,13 @@ async function ensureAppDataFs(detail) {
   try {
     if (d.groupType === 'data-sync' && d.dataGroup) {
       appFs = d.dataGroup.fs;
-      appFsRemoteReady = !!(d.dataGroup.listBackends
-        && d.dataGroup.listBackends().some((b) => b.type === 'RemoteStorage'));
+      const types = remoteBackendTypes(d.dataGroup.listBackends && d.dataGroup.listBackends());
+      appFsRemoteReady = types.length > 0;
+      MANIFEST_ROOT = manifestRootFor(types);
     } else if (d.groupType === 'config-sync' && d.repo) {
-      // 配置同步组：自动建立 app-data 数据组并设 RemoteStorage 后端。
-      // 凭据从「配置仓库实际已登记的 RemoteStorage 后端」读取，而非依赖
-      // connected 事件的 backendInfo——本地-only 仓库下 backendInfo 为 undefined，
-      // 且新增后端后 lastConnected 也不会更新凭据，都会让这里拿到空 href。
+      // 配置同步组：自动建立 app-data 数据组并设与「配置仓库已登记的远端后端」同类型的后端。
+      // 凭据从「配置仓库实际已登记的远端后端」读取，而非依赖 connected 事件的 backendInfo——
+      // 本地-only 仓库下 backendInfo 为 undefined，且新增后端后 lastConnected 也不会更新凭据。
       await ensureAppDataGroup(d.repo);
     } else {
       appFs = null;
@@ -1660,48 +1675,50 @@ async function ensureAppDataFs(detail) {
   }
 }
 
-// 在 config-sync 仓库下确保存在 app-data 数据组，且其后端为 RemoteStorage。
-// 凭据（href/token）取自「配置仓库已登记的 RemoteStorage 后端」的 options，
-// 因此即便 connected 事件未携带 backendInfo 也能正确取到。若仓库尚未登记任何
-// RemoteStorage 后端（例如仍是本地-only 仓库），则静默等待用户在 UI 添加后端，
-// 不臆造一个 href 为空的后端实例。
+// 在 config-sync 仓库下确保存在 app-data 数据组，且其后端与「配置仓库已登记的远端后端」
+// 同类型（RemoteStorage 或 Gitee 等）。凭据（后端 options）取自该已登记后端的 options，
+// 因此即便 connected 事件未携带 backendInfo 也能正确取到。若仓库尚未登记任何远端后端
+// （例如仍是本地-only 仓库），则静默等待用户在 UI 添加后端，不臆造空凭据后端。
 async function ensureAppDataGroup(repo) {
   const meta = await repo.getBackends();
   const backends = (meta && meta.backends) || [];
-  const rs = backends.find((b) => b.type === 'RemoteStorage');
-  if (!rs) {
+  const remote = backends.find((b) => b.type !== 'InMemory' && b.type !== 'IndexedDB');
+  if (!remote) {
     appFs = null;
     appFsRemoteReady = false;
+    MANIFEST_ROOT = '';
     return;
   }
-  const opts = (rs.options && typeof rs.options === 'object') ? rs.options : {};
+  const opts = (remote.options && typeof remote.options === 'object') ? remote.options : {};
   const groups = await repo.listAppDataGroups();
   const existing = groups.find((g) => g.id === 'app-data');
+  let dg;
   if (existing) {
-    const dg = await repo.getAppDataGroup('app-data');
-    const hasRS = !!(dg.listBackends && dg.listBackends().some((b) => b.type === 'RemoteStorage'));
-    if (!hasRS) {
-      await dg.addBackend('rs-app', 'RemoteStorage', Object.assign({}, opts, { basePath: ZF_BASE }));
+    dg = await repo.getAppDataGroup('app-data');
+    const hasSame = !!(dg.listBackends && dg.listBackends().some((b) => b.type === remote.type));
+    if (!hasSame) {
+      const o = (remote.type === 'RemoteStorage') ? Object.assign({}, opts, { basePath: ZF_BASE }) : opts;
+      await dg.addBackend(remote.type === 'RemoteStorage' ? 'rs-app' : 'gitee-app', remote.type, o);
     }
-    appFsRemoteReady = true;
-    appFs = dg.fs;
-    return;
+  } else {
+    const o = (remote.type === 'RemoteStorage') ? Object.assign({}, opts, { basePath: ZF_BASE }) : opts;
+    dg = await repo.createAppDataGroup('app-data', [{
+      id: remote.type === 'RemoteStorage' ? 'rs-app' : 'gitee-app',
+      type: remote.type,
+      options: o,
+    }]);
   }
-  const created = await repo.createAppDataGroup('app-data', [{
-    id: 'rs-app',
-    type: 'RemoteStorage',
-    options: Object.assign({}, opts, { basePath: ZF_BASE }),
-  }]);
+  MANIFEST_ROOT = manifestRootFor([remote.type]);
   appFsRemoteReady = true;
-  appFs = created.fs;
+  appFs = dg.fs;
 }
 
 // 同步组就绪后更新上传按钮可用态与提示。
 function updateSyncStatus() {
   if (dom.btnUpload) dom.btnUpload.disabled = !appFsRemoteReady;
   if (!appFsRemoteReady) {
-    setRS('请在上方「后端 / 数据同步组」配置 RemoteStorage 后端（数据同步组直接选 RemoteStorage；'
-      + '配置同步组则自动建立 app-data 数据组并设为 RemoteStorage 后端）。', null);
+    setRS('请在上方「后端 / 数据同步组」配置远端后端（RemoteStorage / Gitee 等；'
+      + '配置同步组则自动建立 app-data 数据组并设为相同类型后端）。', null);
   }
 }
 
@@ -1961,18 +1978,18 @@ function loadLocalJSON(file) {
 }
 
 async function loadRemoteJSON() {
-  if (!appFsRemoteReady) { setStatus('请先在上方「后端 / 数据同步组」配置 RemoteStorage 后端。', true); return; }
+  if (!appFsRemoteReady) { setStatus('请先在上方「后端 / 数据同步组」配置远端后端（RemoteStorage / Gitee 等）。', true); return; }
   const file = state.computerId || 'fs-manifest';
   const hostFile = sanitizeKey(file + '.json');
   setStatus('正在从数据同步组加载 ' + hostFile + ' …');
   try {
     const fp = fsPromises();
-    const raw = await fp.readFile('/struct/' + hostFile, 'utf-8');
+    const raw = await fp.readFile(mfPath('struct/') + hostFile, 'utf-8');
     const doc = JSON.parse(typeof raw === 'string' ? raw : new TextDecoder().decode(raw));
     // v2 主机索引需逐个拉取卷文件；v1 直接应用。
     const fetchVolume = async (mountFile) => {
       try {
-        const vraw = await fp.readFile('/struct/' + sanitizeKey(mountFile + '.json'), 'utf-8');
+        const vraw = await fp.readFile(mfPath('struct/') + sanitizeKey(mountFile + '.json'), 'utf-8');
         return JSON.parse(typeof vraw === 'string' ? vraw : new TextDecoder().decode(vraw));
       } catch (_) { return null; }
     };
@@ -2067,7 +2084,9 @@ dom.btnLoadRemote.addEventListener('click', loadRemoteJSON);
     const dg = e.detail && e.detail.dataGroup;
     if (dg && dg.fs) {
       appFs = dg.fs;
-      appFsRemoteReady = !!(dg.listBackends && dg.listBackends().some((b) => b.type === 'RemoteStorage'));
+      const types = remoteBackendTypes(dg.listBackends && dg.listBackends());
+      appFsRemoteReady = types.length > 0;
+      MANIFEST_ROOT = manifestRootFor(types);
       updateSyncStatus();
     } else {
       void ensureAppDataFs(null);
