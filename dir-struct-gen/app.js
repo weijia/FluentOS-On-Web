@@ -2047,14 +2047,13 @@ dom.btnLoadRemote.addEventListener('click', loadRemoteJSON);
     updateSyncStatus();
     return;
   }
-  // dir-struct-gen 只用 RemoteStorage 后端（本地 InMemory / IndexedDB 兜底）。
-  // 反注册未随包提供的 GitHub / Gitee 后端，避免 <sync-group-configurator> 探测或实例化它们时
-  // 抛 “Backend package zen-fs-gitee is not available” 之类错误。RemoteStorage 由
-  // vendor/zen-fs-remotestoragejs.global.js 提供全局 ZenFSRemoteStorage。
+  // dir-struct-gen 允许使用 RemoteStorage 与 Gitee 后端（本地 InMemory / IndexedDB 兜底）。
+  // 两者各自的 UMD 全局均已随 vendor 脚本加载（ZenFSRemoteStorage / ZenFSGitee），无需反注册。
+  // 仅 GitHub 未随包提供 UMD，且无使用场景，反注册以避免其工厂实例化时抛
+  // “Backend package zen-fs-github is not available” 之类错误。
   const ZF = window.ZenFSConfigUI;
   if (ZF && typeof ZF.unregisterBackend === 'function') {
     ZF.unregisterBackend('GitHub');
-    ZF.unregisterBackend('Gitee');
   }
   const el = document.createElement('sync-group-configurator');
   el.id = 'zf-sync';
