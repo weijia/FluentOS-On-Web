@@ -596,11 +596,33 @@ const server = http.createServer((req, res) => {
 
 server.on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
-    console.error('Port ' + PORT + ' is already in use. Stop the other server or change PORT in serve.js.');
+    console.error('');
+    console.error('✗ 端口 ' + PORT + ' 已被占用 —— 很可能上一次启动的 Dir Struct Generator 仍在运行。');
+    console.error('  处理方式（任选其一）：');
+    console.error('   1) 直接打开浏览器访问 http://localhost:' + PORT + ' （复用已在运行的实例）；');
+    console.error('   2) 关闭之前那个命令行窗口（Ctrl+C）后再启动本脚本；');
+    console.error('   3) 用其它端口启动：DSG_PORT=8001 node serve.js');
+    console.error('');
+    // 顺手验证「占用者」是否就是本应用，给出更明确的提示。
+    try {
+      const http = require('http');
+      const probe = http.get({ host: '127.0.0.1', port: PORT, path: '/api/version', timeout: 1500 }, (r) => {
+        let body = '';
+        r.on('data', (c) => (body += c));
+        r.on('end', () => {
+          if (body.includes('Dir Struct') || body.includes('version')) {
+            console.error('  （探测到占用者返回了本应用的接口，可直接使用上面的地址。）');
+          }
+          process.exit(1);
+        });
+      });
+      probe.on('error', () => process.exit(1));
+      probe.on('timeout', () => { probe.destroy(); process.exit(1); });
+    } catch (_) { process.exit(1); }
   } else {
     console.error(err);
+    process.exit(1);
   }
-  process.exit(1);
 });
 
 // 仅当作为主模块直接运行（node serve.js）时才启动 HTTP 服务；
