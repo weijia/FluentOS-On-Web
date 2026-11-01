@@ -22,6 +22,19 @@ const state = {
                     // 供预览与主机索引的 mounts.files 列出同一卷的全部分片
 };
 
+// 已连接的「app-data 数据同步组」文件系统（zen-fs）。由同步组配置组件（zen-fs-config-ui）
+// 连接后注入；清单与深挖标记都写入它的根。该组的 RemoteStorage 后端 basePath 固定为
+// app_data/folders/，故实际落点为 app_data/folders/struct/... 与 app_data/folders/folder-deepen/...，
+// 与之前直连 RemoteStorage 的位置逐字节一致。
+let appFs = null;
+// 是否真有 RemoteStorage 后端（首启本地-only 的 data-sync 组无远端，不允许上传）。
+let appFsRemoteReady = false;
+// app-data 数据组的 RemoteStorage 后端固定基路径：确保清单 / 深挖标记落到
+// 与历史直连 RemoteStorage 完全相同的目录（app_data/folders/）。
+const ZF_BASE = 'app_data/folders/';
+// 同步组配置组件使用的 appId：同一 appId 下复用 zen-fs-config 的本地配置仓拓扑。
+const ZF_APP_ID = 'dir-struct-gen';
+
 const dom = {
   optFiles: $('opt-files'),
   optSize: $('opt-size'),
@@ -36,10 +49,6 @@ const dom = {
   btnDeselectAll: $('btn-deselect-all'),
   btnExpand: $('btn-expand'),
   btnCollapse: $('btn-collapse'),
-  rsHref: $('rs-href'),
-  rsToken: $('rs-token'),
-  rsBase: $('rs-base'),
-  rsFile: $('rs-file'),
   btnUpload: $('btn-upload'),
   rsStatus: $('rs-status'),
   btnLoadLocal: $('btn-load-local'),
@@ -901,8 +910,8 @@ async function doRegenerate(genAt) {
   // 刷新树形视图：把刚计算出的目录大小（node._summary）显示到目录行上。
   renderTree();
   // 预览与上传保持一致：拆成 v2 格式——主机索引(version:2) + 每块盘一个卷文件，
-  // 与 uploadToRS 写入 RemoteStorage 的文件一一对应（文件名、结构完全一致）。
-  const file = dom.rsFile.value.trim() || state.computerId || 'fs-manifest';
+  // 与 uploadToRS 写入数据同步组的文件一一对应（文件名、结构完全一致）。
+  const file = state.computerId || 'fs-manifest';
   const payload = buildV2Payload(manifest, file);
   if (!payload.volumes.length && !payload.hostIndex.json.mounts.length) {
     state.previewFiles = [];
@@ -1059,7 +1068,7 @@ function downloadJSON() {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = (dom.rsFile.value.trim() || state.computerId || 'fs-manifest') + '.zip';
+  a.download = (state.computerId || 'fs-manifest') + '.zip';
   a.click();
   URL.revokeObjectURL(url);
 }
@@ -1159,12 +1168,6 @@ function buildZipBlob(files) {
 
 /* ---------------- 按卷拆分上传 + 深挖标记应用 ---------------- */
 
-function joinUrl(href, path) {
-  const h = href.endsWith('/') ? href : href + '/';
-  const p = (path || '').replace(/^\/+/, '');
-  return h + p;
-}
-
 // RemoteStorage 路径里只允许安全字符，其余替换为下划线（如 HostA::C: → HostA__C_）。
 function sanitizeKey(s) {
   return (s || '').replace(/[^A-Za-z0-9._-]/g, '_');
@@ -1175,18 +1178,16 @@ function volumeKeyFor(drive) {
   return drive.volumeId || (state.computerId + '::' + drive.name);
 }
 
-// 读取某块盘的深挖标记（app_data/folder-deepen/<key>.json）。
+// 读取某块盘的深挖标记（数据组根下的 folder-deepen/<key>.json）。
+// 数据组的 RemoteStorage 后端 basePath = app_data/folders/，故实际落点为
+// app_data/folders/folder-deepen/<key>.json，与历史直连 RemoteStorage 一致。
 async function loadDeepenMarks(key) {
-  const href = dom.rsHref.value.trim();
-  const token = dom.rsToken.value.trim();
-  if (!href || !token) return [];
-  // folder-deepen 是独立 category，固定位于 <user>/app_data/folder-deepen/，
-  // 不能拼 rsBase（清单所在 /app_data/folders/），否则会 404。
-  const url = joinUrl(href, 'app_data/folder-deepen/' + sanitizeKey(key) + '.json');
+  if (!appFs) return [];
   try {
-    const res = await fetch(url, { headers: { 'Authorization': 'Bearer ' + token } });
-    if (!res.ok) return [];
-    const obj = await res.json().catch(() => null);
+    const fp = appFs.promises || appFs;
+    const raw = await fp.readFile('/folder-deepen/' + sanitizeKey(key) + '.json', 'utf-8');
+    const text = typeof raw === 'string' ? raw : new TextDecoder().decode(raw);
+    const obj = JSON.parse(text);
     const marks = obj && Array.isArray(obj.marks) ? obj.marks : [];
     return marks.filter((m) => typeof m === 'string');
   } catch (_) { return []; }
@@ -1194,16 +1195,11 @@ async function loadDeepenMarks(key) {
 
 // 消耗某块盘的深挖标记（清空为 {marks:[]}，写回同一文件）。
 async function clearDeepenMarks(key) {
-  const href = dom.rsHref.value.trim();
-  const token = dom.rsToken.value.trim();
-  if (!href || !token) return;
-  const url = joinUrl(href, 'app_data/folder-deepen/' + sanitizeKey(key) + '.json');
+  if (!appFs) return;
   try {
-    await fetch(url, {
-      method: 'PUT',
-      headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ marks: [] }),
-    });
+    await ensureDir('/folder-deepen');
+    const fp = fsPromises();
+    await fp.writeFile('/folder-deepen/' + sanitizeKey(key) + '.json', JSON.stringify({ marks: [] }));
   } catch (_) { /* 清理失败不阻断 */ }
 }
 
@@ -1532,18 +1528,14 @@ function docStamp(doc) {
   return toEpochMs(doc.generatedAt);
 }
 
-// 列出 base 目录下已有的文件名。RemoteStorage 的目录 listing 是 GET 该目录返回的 JSON 对象：
-// { "xxx.json": {"ETag":...}, "sub/": {...} }——以 / 结尾的是子目录，这里只取文件。
-async function listRemoteFiles(href, token, base) {
-  const url = joinUrl(href, base);
+// 列出 struct/ 目录下已有的分片文件名（含 .json）。用于把同一卷的其他分片、
+// 旧版单文件都写进 mounts.files，供读取侧按 volumeId 合并。列举失败不阻断上传。
+async function listRemoteFiles() {
+  if (!appFs) return [];
   try {
-    const res = await fetch(url, {
-      headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'application/json' },
-    });
-    if (!res.ok) return [];
-    const obj = await res.json().catch(() => null);
-    if (!obj || typeof obj !== 'object') return [];
-    return Object.keys(obj).filter((k) => !k.endsWith('/'));
+    const fp = appFs.promises || appFs;
+    const names = await fp.readdir('/struct');
+    return (names || []).filter((k) => typeof k === 'string' && !k.endsWith('/'));
   } catch (_) { return []; }
 }
 
@@ -1558,11 +1550,10 @@ function collectShardsFor(indexKey, volumeKey, names) {
 
 async function uploadToRS() {
   if (!state.root) { setRS('请先生成清单。', false); return; }
-  const href = dom.rsHref.value.trim();
-  const token = dom.rsToken.value.trim();
-  const base = dom.rsBase.value.trim() || '/';
-  const file = dom.rsFile.value.trim() || state.computerId || 'fs-manifest';
-  if (!href || !token) { setRS('请填写服务器地址与 Token。', false); return; }
+  if (!appFsRemoteReady) {
+    setRS('请先在上方「后端 / 数据同步组」配置 RemoteStorage 后端，并等待同步组就绪。', false);
+    return;
+  }
 
   setRS('正在应用深挖标记…', null);
   try {
@@ -1571,9 +1562,9 @@ async function uploadToRS() {
     renderTree();   // 刷新，让深挖目录的特殊标识显示出来
     regenerate();
 
-    // 2) 先摸清远端 base 下已有哪些文件：同一卷的其他分片、旧版单文件都要写进 mounts.files，
+    // 2) 先摸清远端 struct/ 下已有哪些文件：同一卷的其他分片、旧版单文件都要写进 mounts.files，
     //    供读取侧把它们合并起来（列举失败不阻断上传，只是本轮索引里少列几份）。
-    const names = await listRemoteFiles(href, token, base);
+    const names = await listRemoteFiles();
     if (names.length) {
       for (const d of (state.root.children || [])) {
         if (d.kind !== 'dir' || !d.path) continue;
@@ -1583,18 +1574,18 @@ async function uploadToRS() {
 
     // 3) 复用与预览相同的 v2 拆分逻辑，保证「上传内容 == 预览内容」。
     const manifest = await generateManifest();
+    const file = state.computerId || 'fs-manifest';
     const payload = buildV2Payload(manifest, file);
     await saveSettings(); // 记住已知分片，刷新后预览仍能列出同一卷的全部分片
 
     // 4) 只写自己本次的分片（<volumeId>.<createdAt>.json，全新文件名）：不再「读别人的文件 → 合并 → 写回同一文件」，
     //    因此多台主机同时上传也不会互相覆盖、丢更新；完整目录树由读取侧按 volumeId 合并得到。
-    const headers = { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' };
+    await ensureDir('/struct');
+    const fp = fsPromises();
     let uploaded = 0;
     const revs = [];
     for (const vol of payload.volumes) {
-      const vurl = joinUrl(joinUrl(href, base), vol.name);
-      const vres = await fetch(vurl, { method: 'PUT', headers, body: JSON.stringify(vol.json, null, 2) });
-      if (!vres.ok) throw new Error('HTTP ' + vres.status + ' (' + vol.name + ')');
+      await fp.writeFile('/struct/' + vol.name, JSON.stringify(vol.json, null, 2));
       uploaded++;
       rememberShard(vol.key, vol.base);
       revs.push([
@@ -1603,10 +1594,8 @@ async function uploadToRS() {
       ]);
     }
 
-    // 5) 上传主机索引（文件名 = rsFile，已带 .json 则不再重复补后缀）。
-    const hurl = joinUrl(joinUrl(href, base), payload.hostIndex.name);
-    const hres = await fetch(hurl, { method: 'PUT', headers, body: JSON.stringify(payload.hostIndex.json, null, 2) });
-    if (!hres.ok) throw new Error('HTTP ' + hres.status + ' (host index)');
+    // 5) 上传主机索引（文件名 = <computerId>.json）。
+    await fp.writeFile('/struct/' + payload.hostIndex.name, JSON.stringify(payload.hostIndex.json, null, 2));
 
     // 6) 上传成功后落盘分片版本号（下次生成时 +1），并持久化已知分片清单。
     for (const [k, r] of revs) setRevision(k, r);
@@ -1626,6 +1615,96 @@ function setRS(msg, ok) {
   dom.rsStatus.className = 'rs-status ' + (ok === null ? '' : ok ? 'ok' : 'err');
 }
 
+// 取数据组 fs 的 promise 接口（zen-fs chroot fs 通过 .promises 暴露）。
+function fsPromises() {
+  const fp = (appFs && appFs.promises) || appFs;
+  if (!fp) throw new Error('尚未配置同步组 / 后端');
+  return fp;
+}
+
+// 确保目录存在（递归）。RemoteStorage 目录是「隐式」的，已存在时多数后端会抛 EEXIST，
+// 这里统一忽略错误；真正的失败会在随后的 writeFile 暴露出来。
+async function ensureDir(dir) {
+  const fp = fsPromises();
+  try { await fp.mkdir(dir, { recursive: true }); } catch (_) { /* 已存在或无 mkdir */ }
+}
+
+// 从「已连接」事件拿到 app-data 数据组的 fs，并按分支确保 RemoteStorage 后端：
+//  - data-sync：直接使用连好的数据组 fs（其后端即 RemoteStorage）。
+//  - config-sync：自动建立 app-data 数据组，并把同步后端设为 RemoteStorage
+//    （复用用户刚配置的账号 href/token，basePath 固定 app_data/folders/）。
+// 首启本地-only 的 data-sync 组（无远端后端）则 appFsRemoteReady=false，不允许上传。
+async function ensureAppDataFs(detail) {
+  const d = detail || (typeof document !== 'undefined'
+    ? document.getElementById('zf-sync') && document.getElementById('zf-sync').getConnection()
+    : null);
+  if (!d) return;
+  try {
+    if (d.groupType === 'data-sync' && d.dataGroup) {
+      appFs = d.dataGroup.fs;
+      appFsRemoteReady = !!(d.dataGroup.listBackends
+        && d.dataGroup.listBackends().some((b) => b.type === 'RemoteStorage'));
+    } else if (d.groupType === 'config-sync' && d.repo) {
+      // 配置同步组：自动建立 app-data 数据组并设 RemoteStorage 后端。
+      // 凭据从「配置仓库实际已登记的 RemoteStorage 后端」读取，而非依赖
+      // connected 事件的 backendInfo——本地-only 仓库下 backendInfo 为 undefined，
+      // 且新增后端后 lastConnected 也不会更新凭据，都会让这里拿到空 href。
+      await ensureAppDataGroup(d.repo);
+    } else {
+      appFs = null;
+      appFsRemoteReady = false;
+    }
+    updateSyncStatus();
+  } catch (err) {
+    setRS('同步组就绪但获取文件系统失败：' + err.message, false);
+  }
+}
+
+// 在 config-sync 仓库下确保存在 app-data 数据组，且其后端为 RemoteStorage。
+// 凭据（href/token）取自「配置仓库已登记的 RemoteStorage 后端」的 options，
+// 因此即便 connected 事件未携带 backendInfo 也能正确取到。若仓库尚未登记任何
+// RemoteStorage 后端（例如仍是本地-only 仓库），则静默等待用户在 UI 添加后端，
+// 不臆造一个 href 为空的后端实例。
+async function ensureAppDataGroup(repo) {
+  const meta = await repo.getBackends();
+  const backends = (meta && meta.backends) || [];
+  const rs = backends.find((b) => b.type === 'RemoteStorage');
+  if (!rs) {
+    appFs = null;
+    appFsRemoteReady = false;
+    return;
+  }
+  const opts = (rs.options && typeof rs.options === 'object') ? rs.options : {};
+  const groups = await repo.listAppDataGroups();
+  const existing = groups.find((g) => g.id === 'app-data');
+  if (existing) {
+    const dg = await repo.getAppDataGroup('app-data');
+    const hasRS = !!(dg.listBackends && dg.listBackends().some((b) => b.type === 'RemoteStorage'));
+    if (!hasRS) {
+      await dg.addBackend('rs-app', 'RemoteStorage', Object.assign({}, opts, { basePath: ZF_BASE }));
+    }
+    appFsRemoteReady = true;
+    appFs = dg.fs;
+    return;
+  }
+  const created = await repo.createAppDataGroup('app-data', [{
+    id: 'rs-app',
+    type: 'RemoteStorage',
+    options: Object.assign({}, opts, { basePath: ZF_BASE }),
+  }]);
+  appFsRemoteReady = true;
+  appFs = created.fs;
+}
+
+// 同步组就绪后更新上传按钮可用态与提示。
+function updateSyncStatus() {
+  if (dom.btnUpload) dom.btnUpload.disabled = !appFsRemoteReady;
+  if (!appFsRemoteReady) {
+    setRS('请在上方「后端 / 数据同步组」配置 RemoteStorage 后端（数据同步组直接选 RemoteStorage；'
+      + '配置同步组则自动建立 app-data 数据组并设为 RemoteStorage 后端）。', null);
+  }
+}
+
 /* ---------------- 辅助 ---------------- */
 
 function setStatus(msg, isErr = false) {
@@ -1642,10 +1721,6 @@ function forEachNode(node, fn) {
 // 把 RemoteStorage 等输入参数存到本地服务（/api/settings，文件名即主机名），刷新后自动回填。
 function collectSettings() {
   return {
-    rsHref: dom.rsHref.value.trim(),
-    rsToken: dom.rsToken.value.trim(),
-    rsBase: dom.rsBase.value.trim(),
-    rsFile: dom.rsFile.value.trim(),
     optFiles: dom.optFiles.checked,
     optSize: dom.optSize.checked,
     // 已知分片清单（卷索引键 -> 基名数组）：只影响预览与主机索引里 mounts.files 的列全，
@@ -1669,16 +1744,8 @@ async function loadSettings() {
     s = await res.json();
   } catch (_) { /* 没有已存参数则使用默认值 */ }
 
-  // 回填已保存的 RemoteStorage 参数；无保存值时给默认值。
-  dom.rsHref.value = (s && s.rsHref != null) ? s.rsHref : '';
-  dom.rsToken.value = (s && s.rsToken != null) ? s.rsToken : '';
-  // 基础路径默认 /app_data/folders/，清单文件名默认用本机主机名。
-  dom.rsBase.value = (s && s.rsBase != null) ? s.rsBase : '/app_data/folders/';
-  let fileDefault = state.computerId;
-  if (!fileDefault) {
-    try { const d = await (await fetch('/api/drives')).json(); fileDefault = d.computerId; } catch (_) {}
-  }
-  dom.rsFile.value = (s && s.rsFile != null) ? s.rsFile : (fileDefault || 'fs-manifest');
+  // optFiles / optSize 回填；RemoteStorage 连接改由 zen-fs-config-ui 的同步组组件管理，
+  // 不再在此处维护 rsHref/rsToken/rsBase/rsFile。
   dom.optFiles.checked = (s && typeof s.optFiles === 'boolean') ? s.optFiles : false;
   // 「汇总文件数与大小」默认开启（文件大小汇总通常都有用）。
   dom.optSize.checked = (s && typeof s.optSize === 'boolean') ? s.optSize : true;
@@ -1894,24 +1961,19 @@ function loadLocalJSON(file) {
 }
 
 async function loadRemoteJSON() {
-  const href = dom.rsHref.value.trim();
-  const token = dom.rsToken.value.trim();
-  const base = dom.rsBase.value.trim() || '/';
-  const file = dom.rsFile.value.trim() || 'fs-manifest.json';
-  if (!href || !token) { setStatus('请先填写 RemoteStorage 服务器地址与 Token。', true); return; }
-  const url = joinUrl(joinUrl(href, base), file);
-  setStatus('正在从 RemoteStorage 加载 ' + url + ' …');
+  if (!appFsRemoteReady) { setStatus('请先在上方「后端 / 数据同步组」配置 RemoteStorage 后端。', true); return; }
+  const file = state.computerId || 'fs-manifest';
+  const hostFile = sanitizeKey(file + '.json');
+  setStatus('正在从数据同步组加载 ' + hostFile + ' …');
   try {
-    const res = await fetch(url, { headers: { 'Authorization': 'Bearer ' + token } });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const doc = await res.json();
+    const fp = fsPromises();
+    const raw = await fp.readFile('/struct/' + hostFile, 'utf-8');
+    const doc = JSON.parse(typeof raw === 'string' ? raw : new TextDecoder().decode(raw));
     // v2 主机索引需逐个拉取卷文件；v1 直接应用。
     const fetchVolume = async (mountFile) => {
-      const vurl = joinUrl(joinUrl(href, base), mountFile + '.json');
       try {
-        const vres = await fetch(vurl, { headers: { 'Authorization': 'Bearer ' + token } });
-        if (!vres.ok) return null;
-        return await vres.json().catch(() => null);
+        const vraw = await fp.readFile('/struct/' + sanitizeKey(mountFile + '.json'), 'utf-8');
+        return JSON.parse(typeof vraw === 'string' ? vraw : new TextDecoder().decode(vraw));
       } catch (_) { return null; }
     };
     const combined = await applyLoadedDoc(doc, fetchVolume);
@@ -1926,7 +1988,7 @@ async function loadRemoteJSON() {
     if (deepen.warns.length) extra += '；未匹配路径：' + deepen.warns.slice(0, 6).join('、');
     setStatus('已根据清单展开并勾选目录（未匹配到的盘符/路径已跳过）。' + extra, false);
   } catch (err) {
-    setStatus('从 RemoteStorage 加载失败：' + err.message, true);
+    setStatus('从数据同步组加载失败：' + err.message, true);
   }
 }
 
@@ -1969,10 +2031,54 @@ dom.inputLoadFile.addEventListener('change', () => {
 });
 dom.btnLoadRemote.addEventListener('click', loadRemoteJSON);
 
-// RemoteStorage 参数 / 选项变更时自动持久化（刷新后自动填入）
-[dom.rsHref, dom.rsToken, dom.rsBase, dom.rsFile, dom.optFiles, dom.optSize].forEach((el) => {
+// 选项变更时自动持久化（刷新后自动填入）
+[dom.optFiles, dom.optSize].forEach((el) => {
   el.addEventListener('change', saveSettings);
 });
+
+// 同步组配置组件（zen-fs-config-ui）：挂载 <sync-group-configurator>，连接后自动建立
+// app-data 数据组并拿到其 fs。监听「connected」事件；若组件已先连好（页面加载竞态），
+// 启动时再补查一次。
+(function wireSyncGroup() {
+  const host = document.getElementById('zf-sync-host');
+  if (!host) return;
+  if (typeof customElements === 'undefined' || !customElements.get('sync-group-configurator')) {
+    setRS('同步组组件未加载（vendor/zen-fs-config-ui.js 缺失或加载失败）。', false);
+    updateSyncStatus();
+    return;
+  }
+  // dir-struct-gen 只用 RemoteStorage 后端（本地 InMemory / IndexedDB 兜底）。
+  // 反注册未随包提供的 GitHub / Gitee 后端，避免 <sync-group-configurator> 探测或实例化它们时
+  // 抛 “Backend package zen-fs-gitee is not available” 之类错误。RemoteStorage 由
+  // vendor/zen-fs-remotestoragejs.global.js 提供全局 ZenFSRemoteStorage。
+  const ZF = window.ZenFSConfigUI;
+  if (ZF && typeof ZF.unregisterBackend === 'function') {
+    ZF.unregisterBackend('GitHub');
+    ZF.unregisterBackend('Gitee');
+  }
+  const el = document.createElement('sync-group-configurator');
+  el.id = 'zf-sync';
+  el.setAttribute('app-id', ZF_APP_ID);
+  host.appendChild(el);
+
+  el.addEventListener('connected', (e) => { void ensureAppDataFs(e.detail); });
+  // 后端新增/变更：重新从组件取最新连接态（事件 detail 不含 repo/dataGroup）。
+  el.addEventListener('backend-added', () => { void ensureAppDataFs(); });
+  el.addEventListener('data-group-created', (e) => {
+    const dg = e.detail && e.detail.dataGroup;
+    if (dg && dg.fs) {
+      appFs = dg.fs;
+      appFsRemoteReady = !!(dg.listBackends && dg.listBackends().some((b) => b.type === 'RemoteStorage'));
+      updateSyncStatus();
+    } else {
+      void ensureAppDataFs(null);
+    }
+  });
+  // 若组件在绑定监听前已连好，用 getConnection() 兜底。
+  const conn = el.getConnection && el.getConnection();
+  if (conn) void ensureAppDataFs(conn);
+  else updateSyncStatus();
+})();
 
 // 启动时列出本机磁盘，并回填已保存的 UI 参数
 loadInitial();

@@ -258,3 +258,26 @@ input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px;
 .rs-status { grid-column: 1 / -1; font-size: 12px; }
 .rs-status.ok { color: #1a7f37; }
 .rs-status.err { color: var(--danger); }
+/* 同步组配置组件（<sync-group-configurator>）容器 */
+.rs-hint {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-soft);
+}
+.rs-hint code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: rgba(127, 127, 127, 0.15);
+  font-size: 11px;
+}
+.zf-sync-host {
+  grid-column: 1 / -1;
+  min-height: 40px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  overflow: auto;
+}
+.rs-upload:disabled { opacity: 0.55; cursor: not-allowed; }

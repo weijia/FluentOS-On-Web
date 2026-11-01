@@ -55,18 +55,25 @@
     </section>
   </main>
 
-  <details class="rs-panel">
-    <summary>保存到 RemoteStorage（可选）</summary>
+  <details class="rs-panel" open>
+    <summary>后端 / 数据同步组（保存到 RemoteStorage）</summary>
     <div class="rs-grid">
-      <label>服务器地址 (href)<input id="rs-href" type="text" placeholder="https://storage.example.com/" /></label>
-      <label>Token<input id="rs-token" type="password" placeholder="Bearer token" /></label>
-      <label>基础路径 (basePath)<input id="rs-base" type="text" placeholder="/public/" /></label>
-      <label>清单文件名<input id="rs-file" type="text" placeholder="fs-manifest.json" /></label>
-      <button id="btn-upload" class="btn btn-primary rs-upload">上传到 RemoteStorage</button>
+      <p class="rs-hint">
+        用下方的同步组组件配置后端：
+        <b>配置同步组</b> → 本工具自动建立 <code>app-data</code> 数据同步组并把同步后端设为 RemoteStorage；
+        <b>数据同步组</b> → 直接把 RemoteStorage 作为该数据组的后端。
+        RemoteStorage 后端的 <b>basePath 请填 <code>app_data/folders/</code></b>（清单落在
+        <code>app_data/folders/struct/</code>，深挖标记落在 <code>app_data/folders/folder-deepen/</code>）。
+      </p>
+      <div id="zf-sync-host" class="zf-sync-host"></div>
+      <button id="btn-upload" class="btn btn-primary rs-upload" disabled>上传到 RemoteStorage</button>
       <span id="rs-status" class="rs-status"></span>
     </div>
   </details>
 
+  <script src="vendor/zen-fs-config-ui.js" defer></script>
+  <!-- 提供 RemoteStorage 后端的 UMD 全局 ZenFSRemoteStorage（config-ui 的 RemoteStorage 工厂按需取此全局） -->
+  <script src="vendor/zen-fs-remotestoragejs.global.js" defer></script>
   <script src="app.js" defer></script>
 </body>
 </html>
