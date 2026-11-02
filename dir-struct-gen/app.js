@@ -29,23 +29,20 @@ const state = {
 let appFs = null;
 // 是否真有远端后端（首启本地-only 的 data-sync 组无远端，不允许上传）。
 let appFsRemoteReady = false;
-// app-data 数据组的 RemoteStorage 后端固定基路径：确保清单 / 深挖标记落到
-// 与历史直连 RemoteStorage 完全相同的目录（app_data/folders/）。
-const ZF_BASE = 'app_data/folders/';
 // 清单落点的「仓库内前缀」：
 // - RemoteStorage 后端：basePath 已把数据组根定位到 app_data/folders/，故前缀为空；
 // - Gitee 等其它远端后端：数据组根即仓库根，需手动在路径前加 app_data/folders，
 //   使清单落点与 RemoteStorage 逐字节一致（onenav 默认 base=app_data/folders 通用）。
 let MANIFEST_ROOT = '';
+// 当前 app-data 数据组的实际远端后端类型列表（决定按钮文案 / 上传目标提示）。
+let currentRemoteTypes = [];
 // 拼接清单路径：p 形如 'struct/x.json' / 'folder-deepen/x.json' / 'struct'。
 function mfPath(p) {
   return MANIFEST_ROOT ? '/' + MANIFEST_ROOT + '/' + p : '/' + p;
 }
-// 排除本地-only 后端，返回真正的远端后端类型列表。
-function remoteBackendTypes(backends) {
-  return (backends || []).filter((b) => b.type !== 'InMemory' && b.type !== 'IndexedDB').map((b) => b.type);
-}
 // 根据数据组实际远端后端类型推导 MANIFEST_ROOT（RemoteStorage → 空；其余 → app_data/folders）。
+// 远端后端类型列表与“挑选含远端后端的数据同步组”见 sync-dedup.js（SyncDedup.remoteBackendTypes /
+// SyncDedup.pickRemoteDataGroup），此处只保留应用特定的落点推导。
 function manifestRootFor(types) {
   return types.includes('RemoteStorage') ? '' : 'app_data/folders';
 }
@@ -1644,11 +1641,11 @@ async function ensureDir(dir) {
   try { await fp.mkdir(dir, { recursive: true }); } catch (_) { /* 已存在或无 mkdir */ }
 }
 
-// 从「已连接」事件拿到 app-data 数据组的 fs，并按分支确保远端后端：
+// 从「已连接」事件拿到数据同步组的 fs 作为上传目标：
 //  - data-sync：直接使用连好的数据组 fs（其后端即 RemoteStorage / Gitee 等远端）。
-//  - config-sync：自动建立 app-data 数据组，并把同步后端设为与「配置仓库已登记的远端后端」
-//    同类型（复用其 options；RemoteStorage 固定 basePath=app_data/folders/）。
-// 首启本地-only 的 data-sync 组（无远端后端）则 appFsRemoteReady=false，不允许上传。
+//  - config-sync：仅管理配置，不承载目录数据上传——目录数据一律写入「数据同步组」
+//    （由用户新建数据同步组（data-group-created）或直接连接 data-sync 组得到）。
+// 本地-only 的数据组（无远端后端）则 appFsRemoteReady=false，不允许上传。
 async function ensureAppDataFs(detail) {
   const d = detail || (typeof document !== 'undefined'
     ? document.getElementById('zf-sync') && document.getElementById('zf-sync').getConnection()
@@ -1657,17 +1654,32 @@ async function ensureAppDataFs(detail) {
   try {
     if (d.groupType === 'data-sync' && d.dataGroup) {
       appFs = d.dataGroup.fs;
-      const types = remoteBackendTypes(d.dataGroup.listBackends && d.dataGroup.listBackends());
+      const types = SyncDedup.remoteBackendTypes(d.dataGroup.listBackends && d.dataGroup.listBackends());
       appFsRemoteReady = types.length > 0;
+      currentRemoteTypes = types;
       MANIFEST_ROOT = manifestRootFor(types);
     } else if (d.groupType === 'config-sync' && d.repo) {
-      // 配置同步组：自动建立 app-data 数据组并设与「配置仓库已登记的远端后端」同类型的后端。
-      // 凭据从「配置仓库实际已登记的远端后端」读取，而非依赖 connected 事件的 backendInfo——
-      // 本地-only 仓库下 backendInfo 为 undefined，且新增后端后 lastConnected 也不会更新凭据。
-      await ensureAppDataGroup(d.repo);
+      // 配置同步组只承载配置，不承载目录数据，不再自动建 app-data 组当上传目标；
+      // 但若仓库里已登记了「含远端后端的数据同步组」，则选用它作为上传目标——
+      // 目录数据一律走数据同步组。
+      const picked = await SyncDedup.pickRemoteDataGroup(d.repo);
+      if (picked) {
+        appFs = picked.fs;
+        const types = SyncDedup.remoteBackendTypes(picked.listBackends && picked.listBackends());
+        appFsRemoteReady = types.length > 0;
+        currentRemoteTypes = types;
+        MANIFEST_ROOT = manifestRootFor(types);
+      } else {
+        appFs = null;
+        appFsRemoteReady = false;
+        currentRemoteTypes = [];
+        MANIFEST_ROOT = '';
+      }
     } else {
       appFs = null;
       appFsRemoteReady = false;
+      currentRemoteTypes = [];
+      MANIFEST_ROOT = '';
     }
     updateSyncStatus();
   } catch (err) {
@@ -1675,50 +1687,21 @@ async function ensureAppDataFs(detail) {
   }
 }
 
-// 在 config-sync 仓库下确保存在 app-data 数据组，且其后端与「配置仓库已登记的远端后端」
-// 同类型（RemoteStorage 或 Gitee 等）。凭据（后端 options）取自该已登记后端的 options，
-// 因此即便 connected 事件未携带 backendInfo 也能正确取到。若仓库尚未登记任何远端后端
-// （例如仍是本地-only 仓库），则静默等待用户在 UI 添加后端，不臆造空凭据后端。
-async function ensureAppDataGroup(repo) {
-  const meta = await repo.getBackends();
-  const backends = (meta && meta.backends) || [];
-  const remote = backends.find((b) => b.type !== 'InMemory' && b.type !== 'IndexedDB');
-  if (!remote) {
-    appFs = null;
-    appFsRemoteReady = false;
-    MANIFEST_ROOT = '';
-    return;
-  }
-  const opts = (remote.options && typeof remote.options === 'object') ? remote.options : {};
-  const groups = await repo.listAppDataGroups();
-  const existing = groups.find((g) => g.id === 'app-data');
-  let dg;
-  if (existing) {
-    dg = await repo.getAppDataGroup('app-data');
-    const hasSame = !!(dg.listBackends && dg.listBackends().some((b) => b.type === remote.type));
-    if (!hasSame) {
-      const o = (remote.type === 'RemoteStorage') ? Object.assign({}, opts, { basePath: ZF_BASE }) : opts;
-      await dg.addBackend(remote.type === 'RemoteStorage' ? 'rs-app' : 'gitee-app', remote.type, o);
-    }
-  } else {
-    const o = (remote.type === 'RemoteStorage') ? Object.assign({}, opts, { basePath: ZF_BASE }) : opts;
-    dg = await repo.createAppDataGroup('app-data', [{
-      id: remote.type === 'RemoteStorage' ? 'rs-app' : 'gitee-app',
-      type: remote.type,
-      options: o,
-    }]);
-  }
-  MANIFEST_ROOT = manifestRootFor([remote.type]);
-  appFsRemoteReady = true;
-  appFs = dg.fs;
-}
-
-// 同步组就绪后更新上传按钮可用态与提示。
+// 同步组就绪后更新上传按钮可用态、文案与提示。
 function updateSyncStatus() {
-  if (dom.btnUpload) dom.btnUpload.disabled = !appFsRemoteReady;
+  if (dom.btnUpload) {
+    dom.btnUpload.disabled = !appFsRemoteReady;
+    // 文案随实际后端类型动态显示（不再硬编码 RemoteStorage）。
+    const label = !appFsRemoteReady
+      ? '上传到数据同步组'
+      : currentRemoteTypes.length === 1
+        ? '上传到数据同步组（' + currentRemoteTypes[0] + '）'
+        : '上传到数据同步组（' + currentRemoteTypes.join(' + ') + '）';
+    if (dom.btnUpload.textContent !== label) dom.btnUpload.textContent = label;
+  }
   if (!appFsRemoteReady) {
-    setRS('请在上方「后端 / 数据同步组」配置远端后端（RemoteStorage / Gitee 等；'
-      + '配置同步组则自动建立 app-data 数据组并设为相同类型后端）。', null);
+    setRS('请创建或连接「数据同步组」并配置远端后端（RemoteStorage / Gitee 等）；'
+      + '配置同步组仅管理配置，不承载目录数据上传。', null);
   }
 }
 
@@ -2084,8 +2067,9 @@ dom.btnLoadRemote.addEventListener('click', loadRemoteJSON);
     const dg = e.detail && e.detail.dataGroup;
     if (dg && dg.fs) {
       appFs = dg.fs;
-      const types = remoteBackendTypes(dg.listBackends && dg.listBackends());
+      const types = SyncDedup.remoteBackendTypes(dg.listBackends && dg.listBackends());
       appFsRemoteReady = types.length > 0;
+      currentRemoteTypes = types;
       MANIFEST_ROOT = manifestRootFor(types);
       updateSyncStatus();
     } else {

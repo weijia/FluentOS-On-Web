@@ -26341,6 +26341,12 @@ var ZenFSConfigUI = (() => {
     for (const f of fields) {
       if (options && options[f] !== void 0) subset[f] = options[f];
     }
+    if (type === "Gitee" || type === "GitHub") {
+      const defaultEndpoint = type === "Gitee" ? "https://gitee.com/api/v5" : "https://api.github.com";
+      const raw = options && options.baseUrl;
+      const value = typeof raw === "string" && raw.trim() !== "" ? raw : defaultEndpoint;
+      subset["baseUrl"] = value.replace(/\/+$/, "");
+    }
     return subset;
   }
   function backendDedupKey(desc) {
@@ -27731,10 +27737,15 @@ var ZenFSConfigUI = (() => {
       }
       const descPath = this.appDataGroupFilePath(id);
       try {
-        await this.cachedFS.unlink(descPath);
-      } catch {
+        await this.deleteFile(descPath);
+      } catch (err2) {
+        log23.log(`[ConfigRepo] removeAppDataGroup: deleteFile failed for "${id}":`, err2);
+        try {
+          await this.cachedFS.unlink(descPath);
+        } catch {
+        }
+        await this.unlinkVersionSidecar(this.cachedFS, descPath);
       }
-      await this.unlinkVersionSidecar(this.cachedFS, descPath);
       log23.log(`[ConfigRepo] removeAppDataGroup: "${id}" removed`);
     }
     async listAccountBackends() {
@@ -28114,12 +28125,25 @@ var ZenFSConfigUI = (() => {
         onConflict: options.onConflict,
         syncPollIntervalMs: options.syncPollIntervalMs
       });
-      const dataGroup2 = await repo2.createAppDataGroup("default", []);
+      const appDataGroups2 = [];
+      const descriptors2 = await repo2.listAppDataGroups();
+      for (const d of descriptors2) {
+        try {
+          appDataGroups2.push(await repo2.getAppDataGroup(d.id));
+        } catch (err2) {
+          log32(`connect: failed to load app data group "${d.id}":`, err2);
+        }
+      }
+      let dataGroup2 = appDataGroups2[0];
+      if (!dataGroup2) {
+        dataGroup2 = await repo2.createAppDataGroup("default", []);
+        appDataGroups2.push(dataGroup2);
+      }
       return {
         groupType: options.groupType ?? "config-sync",
         repo: repo2,
         dataGroup: dataGroup2,
-        appDataGroups: [dataGroup2]
+        appDataGroups: appDataGroups2
       };
     }
     const { type, options: backendOptions } = options.backendInfo;
@@ -28250,6 +28274,29 @@ var ZenFSConfigUI = (() => {
   }
   async function getDataGroups(repo) {
     return repo.listAppDataGroups();
+  }
+  async function removeAppDataGroup(repo, groupId) {
+    await repo.removeAppDataGroup(groupId);
+  }
+  async function addAppDataGroupBackend(repo, groupId, backendId, type, options, description) {
+    const groups = await repo.listAppDataGroups();
+    const dg = groups.find((g) => g.id === groupId);
+    if (!dg) throw new Error(`Data group "${groupId}" not found`);
+    if (dg.backends.some((b) => b.id === backendId)) {
+      throw new Error(`Backend "${backendId}" already exists in data group "${groupId}"`);
+    }
+    const next = [...dg.backends, { id: backendId, type, options, description, createdAt: Date.now() }];
+    await repo.updateAppDataGroupDescriptor(groupId, next);
+  }
+  async function removeAppDataGroupBackend(repo, groupId, backendId) {
+    const groups = await repo.listAppDataGroups();
+    const dg = groups.find((g) => g.id === groupId);
+    if (!dg) throw new Error(`Data group "${groupId}" not found`);
+    if (!dg.backends.some((b) => b.id === backendId)) {
+      throw new Error(`Backend "${backendId}" not found in data group "${groupId}"`);
+    }
+    const next = dg.backends.filter((b) => b.id !== backendId);
+    await repo.updateAppDataGroupDescriptor(groupId, next);
   }
   async function addDataBackend(dataGroup, id, type, options, description) {
     await dataGroup.addBackend(id, type, options, description);
@@ -28680,6 +28727,7 @@ var ZenFSConfigUI = (() => {
       this.showForm = false;
       this.formContainer = null;
       this.formKind = "backend";
+      this.formTargetDataGroup = null;
       this.listeners = /* @__PURE__ */ new Map();
       this.container = container;
       this.container.classList.add("zfui-root");
@@ -28945,14 +28993,25 @@ var ZenFSConfigUI = (() => {
       this.showForm = true;
       this.render();
     }
+    /** Add a remote backend to an existing data-sync group (config-sync view). */
+    async handleAddDataGroupBackend() {
+      this.metadata = getBackendMetadataList().filter(
+        (m) => !LOCAL_BACKEND_TYPES.has(m.type)
+      );
+      this.formKind = "data-group-backend";
+      this.showForm = true;
+      this.render();
+    }
     openInlineForm() {
       if (!this.formContainer) return;
       const isDataGroup = this.formKind === "data-group";
+      const isGroupBackend = this.formKind === "data-group-backend";
+      const formTitle = isDataGroup ? "\u65B0\u589E\u6570\u636E\u540C\u6B65\u7EC4" : isGroupBackend ? `\u6DFB\u52A0\u540E\u7AEF\u5230 ${this.formTargetDataGroup ?? ""}` : "\u6DFB\u52A0\u540E\u7AEF";
       openBackendForm({
         metadataList: this.metadata,
         container: this.formContainer,
         mode: "inline",
-        title: isDataGroup ? "\u65B0\u589E\u6570\u636E\u540C\u6B65\u7EC4" : "\u6DFB\u52A0\u540E\u7AEF",
+        title: formTitle,
         onSubmit: async (result) => {
           if (isDataGroup) {
             if (!this.repo) return;
@@ -28964,6 +29023,10 @@ var ZenFSConfigUI = (() => {
             }]);
             await this.loadDataGroups();
             this.emit("data-group-created", { groupId: result.id, dataGroup: created });
+          } else if (isGroupBackend && this.repo && this.formTargetDataGroup) {
+            await addAppDataGroupBackend(this.repo, this.formTargetDataGroup, result.id, result.type, result.options, result.description);
+            await this.loadDataGroups();
+            this.emit("backend-added", { backendId: result.id, type: result.type, groupType: "data-sync" });
           } else if (this.mode === "config-sync" && this.repo) {
             await addConfigBackend(this.repo, result.id, result.type, result.options, result.description);
             await this.loadConfigBackends();
@@ -29014,6 +29077,42 @@ var ZenFSConfigUI = (() => {
         this.emit("backend-removed", { backendId: id });
         this.render();
       } catch (err2) {
+        this.error = err2 instanceof Error ? err2.message : String(err2);
+        this.render();
+      }
+    }
+    /** Remove a backend from a data-sync group while in config-sync overview. */
+    async handleRemoveDataGroupBackend(groupId, backendId) {
+      try {
+        if (!this.repo) return;
+        console.log("[zenfs-config-ui] remove data-group backend:", groupId, backendId);
+        const dgs = await getDataGroups(this.repo);
+        const dg = dgs.find((d) => d.id === groupId);
+        if (!dg) {
+          this.error = `\u6570\u636E\u540C\u6B65\u7EC4 ${groupId} \u4E0D\u5B58\u5728`;
+          this.render();
+          return;
+        }
+        await removeAppDataGroupBackend(this.repo, groupId, backendId);
+        console.log("[zenfs-config-ui] descriptor updated, backends now:", dg.backends.filter((b) => b.id !== backendId).map((b) => b.id));
+        await this.loadDataGroups();
+        this.render();
+      } catch (err2) {
+        console.error("[zenfs-config-ui] remove data-group backend FAILED:", err2);
+        this.error = err2 instanceof Error ? err2.message : String(err2);
+        this.render();
+      }
+    }
+    /** Delete an entire data-sync group (dispose instance + remove descriptor). */
+    async handleRemoveDataGroup(groupId) {
+      try {
+        if (!this.repo) return;
+        console.log("[zenfs-config-ui] remove data-group:", groupId);
+        await removeAppDataGroup(this.repo, groupId);
+        await this.loadDataGroups();
+        this.render();
+      } catch (err2) {
+        console.error("[zenfs-config-ui] remove data-group FAILED:", err2);
         this.error = err2 instanceof Error ? err2.message : String(err2);
         this.render();
       }
@@ -29130,13 +29229,38 @@ var ZenFSConfigUI = (() => {
         for (const dg of this.dataGroups) {
           const card = el("div", { className: "zfui-data-group" });
           card.appendChild(el("div", { className: "zfui-data-group-name" }, dg.id));
-          for (const b of dg.backends) {
-            card.appendChild(el(
-              "div",
-              { style: "font-size:12px;color:#6b7280;padding:2px 0" },
-              `${b.id} (${b.type})`
-            ));
+          const dgList = el("ul", { className: "zfui-backend-list" });
+          if (dg.backends.length === 0) {
+            dgList.appendChild(el("li", { className: "zfui-backend-item", style: "color:#9ca3af;font-size:12px" }, "\uFF08\u65E0\u540E\u7AEF\uFF09"));
+          } else {
+            for (const b of dg.backends) {
+              dgList.appendChild(this.buildBackendItem(b.id, b.type, b.options ?? {}, b.description, true, () => void this.handleRemoveDataGroupBackend(dg.id, b.id)));
+            }
           }
+          card.appendChild(dgList);
+          const addDgBackendBtn = el("button", { className: "zfui-btn zfui-btn-primary" }, "+ \u6DFB\u52A0\u540E\u7AEF");
+          on(addDgBackendBtn, "click", () => {
+            this.formTargetDataGroup = dg.id;
+            void this.handleAddDataGroupBackend();
+          });
+          card.appendChild(addDgBackendBtn);
+          const removeGroupBtn = el("button", { className: "zfui-btn zfui-btn-danger" }, "\u{1F5D1} \u5220\u9664\u7EC4");
+          let confirmingGroup = false;
+          on(removeGroupBtn, "click", () => {
+            if (confirmingGroup) {
+              confirmingGroup = false;
+              removeGroupBtn.textContent = "\u{1F5D1} \u5220\u9664\u7EC4";
+              void this.handleRemoveDataGroup(dg.id);
+            } else {
+              confirmingGroup = true;
+              removeGroupBtn.textContent = "\u786E\u5B9A?";
+              window.setTimeout(() => {
+                confirmingGroup = false;
+                removeGroupBtn.textContent = "\u{1F5D1} \u5220\u9664\u7EC4";
+              }, 3e3);
+            }
+          });
+          card.appendChild(removeGroupBtn);
           dgSection.appendChild(card);
         }
       }
@@ -29186,7 +29310,7 @@ var ZenFSConfigUI = (() => {
       ]));
       return li;
     }
-    buildBackendItem(id, type, options, description, removable) {
+    buildBackendItem(id, type, options, description, removable, onRemove) {
       const meta = this.metadata.find((m) => m.type === type);
       const label = meta ? `${meta.icon} ${meta.label}` : type;
       const li = el("li", { className: "zfui-backend-item" });
@@ -29247,7 +29371,8 @@ var ZenFSConfigUI = (() => {
               removeBtn.classList.remove("zfui-btn-danger-active");
             }, 3e3);
           } else {
-            void this.handleRemoveBackend(id);
+            if (onRemove) onRemove(id);
+            else void this.handleRemoveBackend(id);
           }
         });
         actions.appendChild(removeBtn);

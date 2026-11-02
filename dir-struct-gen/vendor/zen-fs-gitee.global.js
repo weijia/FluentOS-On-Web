@@ -18839,6 +18839,8 @@ var ZenFSGitee = (() => {
             return;
           }
         }
+        const stillExists = await this.getContents(path).then(() => true).catch(() => false);
+        if (!stillExists) return;
         throw err2;
       }
     }

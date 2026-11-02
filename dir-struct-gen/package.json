@@ -5,7 +5,8 @@
   "description": "本地目录结构生成器（零依赖；Windows 下可选安装 node-windows-readdir-fast 加速目录大小统计）",
   "main": "serve.js",
   "scripts": {
-    "start": "node serve.js"
+    "start": "node serve.js",
+    "test": "node --test sync-dedup.test.js"
   },
   "optionalDependencies": {
     "node-windows-readdir-fast": "^1.0.3"
