@@ -1755,11 +1755,18 @@ function renderSyncStatus() {
   let deleted = 0;
   let skipped = 0;
   let conflicts = 0;
+  let lastError = null;
   for (const st of statuses.values()) {
     if (st.state === 'syncing') syncing = true;
     if (st.watching) watching++;
     lastCheck = Math.max(lastCheck, st.lastCheckTime || 0);
     totalSyncs += st.totalSyncs || 0;
+    // lastError 是 pair 级粘性记录（zen-fs-sync ^0.4.17）；旧 bundle 没有，回退读 lastResult.errors
+    if (st.lastError) {
+      lastError = st.lastError;
+    } else if (st.lastResult && st.lastResult.errors && st.lastResult.errors.length) {
+      lastError = { message: st.lastResult.errors[0].message, timestamp: st.lastResult.timestamp };
+    }
     const r = st.lastResult;
     if (r) {
       lastCheck = Math.max(lastCheck, r.timestamp || 0);
@@ -1778,6 +1785,10 @@ function renderSyncStatus() {
     '上轮 新增/更新/删除/跳过 = ' + created + '/' + updated + '/' + deleted + '/' + skipped,
   ];
   if (conflicts) parts.push('冲突 ' + conflicts);
+  if (lastError) {
+    parts.push('最后错误 ' + fmtSyncTime(lastError.timestamp) + ' '
+      + String(lastError.message).slice(0, 80));
+  }
   dom.syncStatus.textContent = '同步状态：' + parts.join(' · ');
 }
 

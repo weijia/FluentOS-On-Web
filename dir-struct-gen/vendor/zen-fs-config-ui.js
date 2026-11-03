@@ -24661,6 +24661,7 @@ var ZenFSConfigUI = (() => {
       __publicField(this, "resolver");
       __publicField(this, "state", "idle");
       __publicField(this, "lastResult");
+      __publicField(this, "lastError");
       __publicField(this, "lastCheckTime");
       __publicField(this, "totalSyncs", 0);
       // 轮询定时器列表（远程 shouldSync 轮询，或两端都不支持变更检测时的兜底轮询）
@@ -24743,6 +24744,9 @@ var ZenFSConfigUI = (() => {
         }
         result.durationMs = Date.now() - startTime;
         this.lastResult = result;
+        if (result.errors && result.errors.length > 0) {
+          this.lastError = { message: result.errors[0].message, timestamp: result.timestamp };
+        }
         this.totalSyncs++;
         this.state = this.pollTimers.length > 0 ? "watching" : "idle";
         const hasActivity = result.filesCreated > 0 || result.filesUpdated > 0 || result.filesDeleted > 0 || result.conflicts.length > 0;
@@ -24758,6 +24762,7 @@ var ZenFSConfigUI = (() => {
         return result;
       } catch (error2) {
         this.state = this.pollTimers.length > 0 ? "watching" : "idle";
+        this.lastError = { message: error2 instanceof Error ? error2.message : String(error2), timestamp: Date.now() };
         log3(`[zen-fs-sync] sync ERROR pairId=${this.pairId}`, error2);
         this.emit({
           type: "sync:error",
@@ -24849,6 +24854,7 @@ var ZenFSConfigUI = (() => {
         state: this.state,
         lastResult: this.lastResult,
         lastCheckTime: this.lastCheckTime,
+        lastError: this.lastError,
         // 是否正在 watch：有轮询定时器或处于 Watching 状态
         watching: this.pollTimers.length > 0 || this.state === "watching",
         totalSyncs: this.totalSyncs
@@ -24914,6 +24920,7 @@ var ZenFSConfigUI = (() => {
       let filesDeleted = 0;
       let filesSkipped = 0;
       const conflicts = [];
+      const errors = [];
       for (const change of changes) {
         const srcPath = resolvePath(this.root, change.path);
         const tgtPath = resolvePath(this.root, change.path);
@@ -24970,6 +24977,7 @@ var ZenFSConfigUI = (() => {
               else filesUpdated++;
             } catch (err2) {
               log3(`[zen-fs-sync] WRITE FAIL ${change.type} [${directionLabel}] ${srcPath} \u2192 ${tgtPath}:`, err2);
+              errors.push({ path: change.path, message: err2 instanceof Error ? err2.message : String(err2) });
               filesSkipped++;
             }
             break;
@@ -24982,6 +24990,7 @@ var ZenFSConfigUI = (() => {
               filesDeleted++;
             } catch (err2) {
               log3(`[zen-fs-sync] DELETE SKIP [${directionLabel}] ${tgtPath}:`, err2);
+              errors.push({ path: change.path, message: err2 instanceof Error ? err2.message : String(err2) });
               filesSkipped++;
             }
             break;
@@ -24998,6 +25007,7 @@ var ZenFSConfigUI = (() => {
         filesDeleted,
         filesSkipped,
         conflicts,
+        errors,
         changes,
         durationMs: 0
         // 由 sync() 方法填充
@@ -25054,6 +25064,7 @@ var ZenFSConfigUI = (() => {
       let filesSkipped = 0;
       const conflicts = [];
       const changes = [];
+      const errors = [];
       const allPaths = /* @__PURE__ */ new Set([...srcSnap.keys(), ...tgtSnap.keys()]);
       for (const path of allPaths) {
         const srcEntry = srcSnap.get(path);
@@ -25069,6 +25080,7 @@ var ZenFSConfigUI = (() => {
               changes.push({ path, type: "deleted", targetSnapshot: tgtEntry });
             } catch (err2) {
               log3(`[zen-fs-sync] DELETE SKIP (src deleted) target ${path}:`, err2);
+              errors.push({ path, message: err2 instanceof Error ? err2.message : String(err2) });
               filesSkipped++;
             }
           } else {
@@ -25083,6 +25095,7 @@ var ZenFSConfigUI = (() => {
               }
             } catch (err2) {
               log3(`[zen-fs-sync] COPY FAIL target\u2192source ${path}:`, err2);
+              errors.push({ path, message: err2 instanceof Error ? err2.message : String(err2) });
               filesSkipped++;
             }
           }
@@ -25097,6 +25110,7 @@ var ZenFSConfigUI = (() => {
               changes.push({ path, type: "deleted", sourceSnapshot: srcEntry });
             } catch (err2) {
               log3(`[zen-fs-sync] DELETE SKIP (tgt deleted) source ${path}:`, err2);
+              errors.push({ path, message: err2 instanceof Error ? err2.message : String(err2) });
               filesSkipped++;
             }
           } else {
@@ -25111,6 +25125,7 @@ var ZenFSConfigUI = (() => {
               }
             } catch (err2) {
               log3(`[zen-fs-sync] COPY FAIL source\u2192target ${path}:`, err2);
+              errors.push({ path, message: err2 instanceof Error ? err2.message : String(err2) });
               filesSkipped++;
             }
           }
@@ -25127,6 +25142,7 @@ var ZenFSConfigUI = (() => {
               tgtContent = await this.target.readFile(fullPath, "utf-8");
             } catch (err2) {
               log3(`[zen-fs-sync] CONTENT READ FAIL ${path}:`, err2);
+              errors.push({ path, message: err2 instanceof Error ? err2.message : String(err2) });
               filesSkipped++;
               continue;
             }
@@ -25152,6 +25168,7 @@ var ZenFSConfigUI = (() => {
                 }
               } catch (err2) {
                 log3(`[zen-fs-sync] UPDATE FAIL ${fromLabel} ${path}:`, err2);
+                errors.push({ path, message: err2 instanceof Error ? err2.message : String(err2) });
                 filesSkipped++;
               }
             }
@@ -25194,6 +25211,7 @@ var ZenFSConfigUI = (() => {
         filesDeleted,
         filesSkipped,
         conflicts,
+        errors,
         changes,
         durationMs
       };
@@ -28812,7 +28830,7 @@ var ZenFSConfigUI = (() => {
     }
     // ── Version logging ──────────────────────────────────────────────────
     logVersion() {
-      const uiVersion = true ? "0.3.13" : "dev";
+      const uiVersion = true ? "0.3.14" : "dev";
       console.log(
         `%c[zen-fs-config-ui] v${uiVersion}%c (appId=${this.props.appId})`,
         "color:#2563eb;font-weight:bold",
