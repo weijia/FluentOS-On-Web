@@ -29,8 +29,8 @@ const state = {
 let appFs = null;
 // 是否真有远端后端（首启本地-only 的 data-sync 组无远端，不允许上传）。
 let appFsRemoteReady = false;
-// 当前上传目标所属的数据组句柄（只用于只读展示 getSyncStatuses()，不参与同步逻辑）。
-let currentDataGroup = null;
+
+
 // 清单落点的「仓库内前缀」：
 // - RemoteStorage 后端：basePath 已把数据组根定位到 app_data/folders/，故前缀为空；
 // - Gitee 等其它远端后端：数据组根即仓库根，需手动在路径前加 app_data/folders，
@@ -67,8 +67,8 @@ const dom = {
   btnCollapse: $('btn-collapse'),
   btnUpload: $('btn-upload'),
   rsStatus: $('rs-status'),
-  syncStatus: $('sync-status'),
-  btnSyncRefresh: $('btn-sync-refresh'),
+
+
   btnLoadLocal: $('btn-load-local'),
   inputLoadFile: $('input-load-file'),
   btnLoadRemote: $('btn-load-remote'),
@@ -1624,9 +1624,7 @@ async function uploadToRS() {
   } catch (err) {
     setRS('上传失败：' + err.message, false);
   }
-  // 上传后 watcher 会异步把本地写入推到远端：先立即刷新一次，再等一轮 debounce 后刷新。
-  renderSyncStatus();
-  setTimeout(renderSyncStatus, 2000);
+  // 同步状态由 <sync-group-configurator> 在每个同步组卡片内展示，这里不再重复。
 }
 
 function setRS(msg, ok) {
@@ -1660,7 +1658,7 @@ async function ensureAppDataFs(detail) {
   if (!d) return;
   try {
     if (d.groupType === 'data-sync' && d.dataGroup) {
-      currentDataGroup = d.dataGroup;
+
       appFs = d.dataGroup.fs;
       const types = SyncDedup.remoteBackendTypes(d.dataGroup.listBackends && d.dataGroup.listBackends());
       appFsRemoteReady = types.length > 0;
@@ -1672,28 +1670,27 @@ async function ensureAppDataFs(detail) {
       // 目录数据一律走数据同步组。
       const picked = await SyncDedup.pickRemoteDataGroup(d.repo);
       if (picked) {
-        currentDataGroup = picked;
+
         appFs = picked.fs;
         const types = SyncDedup.remoteBackendTypes(picked.listBackends && picked.listBackends());
         appFsRemoteReady = types.length > 0;
         currentRemoteTypes = types;
         MANIFEST_ROOT = manifestRootFor(types);
       } else {
-        currentDataGroup = null;
+
         appFs = null;
         appFsRemoteReady = false;
         currentRemoteTypes = [];
         MANIFEST_ROOT = '';
       }
     } else {
-      currentDataGroup = null;
+
       appFs = null;
       appFsRemoteReady = false;
       currentRemoteTypes = [];
       MANIFEST_ROOT = '';
     }
     updateSyncStatus();
-    renderSyncStatus();
   } catch (err) {
     setRS('同步组就绪但获取文件系统失败：' + err.message, false);
   }
@@ -1717,79 +1714,6 @@ function updateSyncStatus() {
   } else if (currentRemoteTypes.length) {
     setRS('数据同步组已就绪（' + currentRemoteTypes.join(' / ') + '）：点击上传后由本地 watcher 推到远端。', null);
   }
-}
-
-// 只读展示数据组同步状态：直接读 AppDataGroup.getSyncStatuses()（zen-fs-config 已有 API），
-// 不注册同步事件、不改同步语义。库目前没有把 sync:error 暴露给宿主，也没有错误字段，
-// 因此这里只能展示最近一次同步的计数与冲突，无法展示“最后错误”。
-function fmtSyncTime(ts) {
-  if (!ts) return '—';
-  try { return new Date(ts).toLocaleTimeString(); } catch (_) { return '—'; }
-}
-
-function renderSyncStatus() {
-  if (!dom.syncStatus) return;
-  dom.syncStatus.className = 'rs-status';
-  if (!currentDataGroup || typeof currentDataGroup.getSyncStatuses !== 'function') {
-    dom.syncStatus.textContent = '同步状态：未连接数据同步组';
-    return;
-  }
-  let statuses;
-  try {
-    statuses = currentDataGroup.getSyncStatuses();
-  } catch (err) {
-    dom.syncStatus.textContent = '同步状态读取失败：' + err.message;
-    dom.syncStatus.className = 'rs-status err';
-    return;
-  }
-  if (!statuses || statuses.size === 0) {
-    dom.syncStatus.textContent = '同步状态：暂无同步对（该组可能没有后端）';
-    return;
-  }
-  let syncing = false;
-  let watching = 0;
-  let lastCheck = 0;
-  let totalSyncs = 0;
-  let created = 0;
-  let updated = 0;
-  let deleted = 0;
-  let skipped = 0;
-  let conflicts = 0;
-  let lastError = null;
-  for (const st of statuses.values()) {
-    if (st.state === 'syncing') syncing = true;
-    if (st.watching) watching++;
-    lastCheck = Math.max(lastCheck, st.lastCheckTime || 0);
-    totalSyncs += st.totalSyncs || 0;
-    // lastError 是 pair 级粘性记录（zen-fs-sync ^0.4.17）；旧 bundle 没有，回退读 lastResult.errors
-    if (st.lastError) {
-      lastError = st.lastError;
-    } else if (st.lastResult && st.lastResult.errors && st.lastResult.errors.length) {
-      lastError = { message: st.lastResult.errors[0].message, timestamp: st.lastResult.timestamp };
-    }
-    const r = st.lastResult;
-    if (r) {
-      lastCheck = Math.max(lastCheck, r.timestamp || 0);
-      created += r.filesCreated || 0;
-      updated += r.filesUpdated || 0;
-      deleted += r.filesDeleted || 0;
-      skipped += r.filesSkipped || 0;
-      conflicts += (r.conflicts || []).length;
-    }
-  }
-  const parts = [
-    '同步对 ' + statuses.size + '（监听 ' + watching + '）',
-    syncing ? '正在同步…' : '空闲',
-    '最近检查 ' + fmtSyncTime(lastCheck),
-    '累计 ' + totalSyncs + ' 次',
-    '上轮 新增/更新/删除/跳过 = ' + created + '/' + updated + '/' + deleted + '/' + skipped,
-  ];
-  if (conflicts) parts.push('冲突 ' + conflicts);
-  if (lastError) {
-    parts.push('最后错误 ' + fmtSyncTime(lastError.timestamp) + ' '
-      + String(lastError.message).slice(0, 80));
-  }
-  dom.syncStatus.textContent = '同步状态：' + parts.join(' · ');
 }
 
 /* ---------------- 辅助 ---------------- */
@@ -2087,7 +2011,6 @@ dom.btnRegen.addEventListener('click', () => { summaryCache.clear(); regenerate(
 dom.btnCopy.addEventListener('click', copyJSON);
 dom.btnDownload.addEventListener('click', downloadJSON);
 dom.btnUpload.addEventListener('click', uploadToRS);
-if (dom.btnSyncRefresh) dom.btnSyncRefresh.addEventListener('click', renderSyncStatus);
 
 dom.btnSelectAll.addEventListener('click', () => {
   if (!state.root) return;
@@ -2154,14 +2077,13 @@ dom.btnLoadRemote.addEventListener('click', loadRemoteJSON);
   el.addEventListener('data-group-created', (e) => {
     const dg = e.detail && e.detail.dataGroup;
     if (dg && dg.fs) {
-      currentDataGroup = dg;
+
       appFs = dg.fs;
       const types = SyncDedup.remoteBackendTypes(dg.listBackends && dg.listBackends());
       appFsRemoteReady = types.length > 0;
       currentRemoteTypes = types;
       MANIFEST_ROOT = manifestRootFor(types);
       updateSyncStatus();
-      renderSyncStatus();
     } else {
       void ensureAppDataFs(null);
     }

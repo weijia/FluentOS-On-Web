@@ -27850,7 +27850,11 @@ var ZenFSConfigUI = (() => {
     }
     async init() {
       try {
-        const localPrimary = await resolveLocalPrimary(this.appId, "data");
+        const localPrimary = await resolveLocalPrimary(
+          this.appId,
+          "data",
+          this.groupId === "default" ? {} : { idbStoreName: `zen-fs-config-data-${this.appId}-${this.groupId}` }
+        );
         this.localFS = await createBackend(localPrimary);
       } catch {
         throw new Error(`Failed to create local primary for data group "${this.groupId}"`);
@@ -28571,6 +28575,18 @@ var ZenFSConfigUI = (() => {
   margin-bottom: 10px; background: #f9fafb;
 }
 .zfui-data-group-name { font-weight: 600; font-size: 13px; margin-bottom: 8px; }
+.zfui-status-line {
+  font-size: 11px; color: #4b5563; line-height: 1.7; margin: 6px 0 4px;
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.zfui-status-line.err { color: #b91c1c; }
+.zfui-status-refresh {
+  padding: 2px 10px; font-size: 11px; cursor: pointer;
+  background: #f3f4f6; border: 1px solid #d1d5db; border-radius: 4px;
+  color: #374151; flex-shrink: 0;
+}
+.zfui-status-refresh:hover { background: #e5e7eb; }
+.zfui-status-detail { font-size: 11px; color: #6b7280; line-height: 1.7; }
 `;
 
   // src/core/views/backend-form.ts
@@ -28801,6 +28817,53 @@ var ZenFSConfigUI = (() => {
   // src/core/configurator.ts
   var LOCAL_BACKEND_TYPES = /* @__PURE__ */ new Set(["IndexedDB", "InMemory"]);
   var STORAGE_KEY = "zenfs-config-ui:backend";
+  var STATUS_REFRESH_MS = 2e3;
+  function fmtClock(ts) {
+    if (!ts) return "\u2014";
+    try {
+      return new Date(ts).toLocaleTimeString("zh-CN", { hour12: false });
+    } catch {
+      return "\u2014";
+    }
+  }
+  function formatSyncStatuses(statuses) {
+    if (statuses.size === 0) {
+      return { text: "\u540C\u6B65\u5BF9 0 \xB7 \u65E0\u53EF\u7528\u8FDC\u7AEF\u540E\u7AEF\uFF08\u4EC5\u672C\u5730\uFF09" };
+    }
+    let syncing = false;
+    let lastCheck = 0;
+    let totalSyncs = 0;
+    let created = 0;
+    let updated = 0;
+    let deleted = 0;
+    let skipped = 0;
+    let conflicts = 0;
+    let lastError;
+    for (const st of statuses.values()) {
+      if (String(st.state) === "syncing") syncing = true;
+      if (st.lastCheckTime) lastCheck = Math.max(lastCheck, st.lastCheckTime);
+      totalSyncs += st.totalSyncs || 0;
+      const r = st.lastResult;
+      if (r) {
+        lastCheck = Math.max(lastCheck, r.timestamp || 0);
+        created += r.filesCreated || 0;
+        updated += r.filesUpdated || 0;
+        deleted += r.filesDeleted || 0;
+        skipped += r.filesSkipped || 0;
+        conflicts += (r.conflicts || []).length;
+      }
+      if (st.lastError) lastError = st.lastError;
+    }
+    const text = [
+      `\u540C\u6B65\u5BF9 ${statuses.size}`,
+      syncing ? "\u540C\u6B65\u4E2D" : "\u7A7A\u95F2",
+      `\u6700\u8FD1\u68C0\u67E5 ${fmtClock(lastCheck)}`,
+      `\u7D2F\u8BA1 ${totalSyncs} \u6B21`,
+      `\u4E0A\u8F6E +${created} ~${updated} -${deleted} skip:${skipped}`,
+      `\u51B2\u7A81 ${conflicts}`
+    ].join(" \xB7 ");
+    return { text, error: lastError };
+  }
   var SyncGroupConfiguratorCore = class {
     constructor(container, props) {
       this.destroyed = false;
@@ -28813,6 +28876,15 @@ var ZenFSConfigUI = (() => {
       this.configBackends = [];
       this.dataGroups = [];
       this.dataBackends = [];
+      /**
+       * Live data-group instances loaded by `connect()` (keyed by group id). Only
+       * these can report real sync status; a descriptor without an entry is shown
+       * as「未连接」— the UI never instantiates a group just to render a status.
+       */
+      this.groupInstances = /* @__PURE__ */ new Map();
+      this.groupUnavailable = /* @__PURE__ */ new Map();
+      this.statusRefs = [];
+      this.statusTimer = null;
       /** Legacy `app-data` group created by older dir-struct-gen versions. */
       this.legacyAppData = null;
       this.metadata = [];
@@ -28830,7 +28902,7 @@ var ZenFSConfigUI = (() => {
     }
     // ── Version logging ──────────────────────────────────────────────────
     logVersion() {
-      const uiVersion = true ? "0.3.14" : "dev";
+      const uiVersion = true ? "0.3.16" : "dev";
       console.log(
         `%c[zen-fs-config-ui] v${uiVersion}%c (appId=${this.props.appId})`,
         "color:#2563eb;font-weight:bold",
@@ -29004,6 +29076,7 @@ var ZenFSConfigUI = (() => {
     }
     destroy() {
       this.destroyed = true;
+      this.stopStatusTimer();
       clear(this.container);
       if (this.styleEl) this.styleEl.remove();
       this.listeners.clear();
@@ -29030,6 +29103,14 @@ var ZenFSConfigUI = (() => {
       this.render();
       try {
         const result = await connectGroup(this.props.appId, backendInfo, this.props.nodeId);
+        this.groupInstances = /* @__PURE__ */ new Map();
+        this.groupUnavailable = /* @__PURE__ */ new Map();
+        for (const g of result.appDataGroups ?? []) {
+          if (g) this.groupInstances.set(g.groupId, g);
+        }
+        if (result.dataGroup) {
+          this.groupInstances.set(result.dataGroup.groupId, result.dataGroup);
+        }
         if (result.repo) {
           this.repo = result.repo;
           this.mode = "config-sync";
@@ -29076,6 +29157,19 @@ var ZenFSConfigUI = (() => {
       } catch {
         this.dataGroups = [];
       }
+      const ids = new Set(this.dataGroups.map((d) => d.id));
+      for (const id of [...this.groupInstances.keys()]) {
+        if (!ids.has(id)) this.groupInstances.delete(id);
+      }
+      this.groupUnavailable = /* @__PURE__ */ new Map();
+      for (const d of this.dataGroups) {
+        if (!this.groupInstances.has(d.id)) {
+          this.groupUnavailable.set(
+            d.id,
+            "\u8BE5\u7EC4\u672A\u5728\u5F53\u524D\u4F1A\u8BDD\u5B9E\u4F8B\u5316\uFF08\u8FDE\u63A5\u65F6\u52A0\u8F7D\u5931\u8D25\u6216\u4EC5\u5B58\u5728\u4E8E\u63CF\u8FF0\u7B26\u4E2D\uFF09\uFF0C\u6682\u65E0\u5B9E\u65F6\u72B6\u6001"
+          );
+        }
+      }
       this.legacyAppData = detectLegacyAppDataGroup(this.dataGroups);
     }
     /**
@@ -29103,6 +29197,7 @@ var ZenFSConfigUI = (() => {
           let migratedGroup;
           try {
             migratedGroup = await this.repo.getAppDataGroup(result.targetGroupId);
+            if (migratedGroup) this.groupInstances.set(migratedGroup.groupId, migratedGroup);
           } catch {
             migratedGroup = void 0;
           }
@@ -29157,6 +29252,7 @@ var ZenFSConfigUI = (() => {
               options: result.options,
               description: result.description
             }]);
+            this.groupInstances.set(created.groupId, created);
             await this.loadDataGroups();
             this.emit("data-group-created", { groupId: result.id, dataGroup: created });
           } else if (isGroupBackend && this.repo && this.formTargetDataGroup) {
@@ -29245,6 +29341,8 @@ var ZenFSConfigUI = (() => {
         if (!this.repo) return;
         console.log("[zenfs-config-ui] remove data-group:", groupId);
         await removeAppDataGroup(this.repo, groupId);
+        this.groupInstances.delete(groupId);
+        this.groupUnavailable.delete(groupId);
         await this.loadDataGroups();
         this.render();
       } catch (err2) {
@@ -29275,6 +29373,7 @@ var ZenFSConfigUI = (() => {
     }
     render() {
       if (this.destroyed) return;
+      this.statusRefs = [];
       clear(this.container);
       if (this.connecting) {
         this.container.appendChild(el("div", { className: "zfui-loading" }, "\u6B63\u5728\u8FDE\u63A5\u540E\u7AEF..."));
@@ -29317,6 +29416,8 @@ var ZenFSConfigUI = (() => {
       } else {
         this.formContainer = null;
       }
+      this.updateStatusRows();
+      this.ensureStatusTimer();
     }
     getSubtitle() {
       if (this.mode === "config-sync" && this.configBackends.length === 0) {
@@ -29345,6 +29446,9 @@ var ZenFSConfigUI = (() => {
       const frag = document.createDocumentFragment();
       const syncSection = el("div", { className: "zfui-section" });
       syncSection.appendChild(el("div", { className: "zfui-section-title" }, "\u{1F527} \u540C\u6B65\u540E\u7AEF"));
+      syncSection.appendChild(this.buildStatusRow(
+        () => this.repo ? this.repo.getSyncStatuses() : null
+      ));
       const list2 = el("ul", { className: "zfui-backend-list" });
       list2.appendChild(this.buildLocalBackendItem());
       for (const b of this.configBackends) {
@@ -29393,6 +29497,13 @@ var ZenFSConfigUI = (() => {
         for (const dg of this.dataGroups) {
           const card = el("div", { className: "zfui-data-group" });
           card.appendChild(el("div", { className: "zfui-data-group-name" }, dg.id));
+          card.appendChild(this.buildStatusRow(
+            () => {
+              const live = this.groupInstances.get(dg.id);
+              return live ? live.getSyncStatuses() : null;
+            },
+            this.groupInstances.has(dg.id) ? void 0 : this.groupUnavailable.get(dg.id)
+          ));
           const dgList = el("ul", { className: "zfui-backend-list" });
           if (dg.backends.length === 0) {
             dgList.appendChild(el("li", { className: "zfui-backend-item", style: "color:#9ca3af;font-size:12px" }, "\uFF08\u65E0\u540E\u7AEF\uFF09"));
@@ -29439,6 +29550,9 @@ var ZenFSConfigUI = (() => {
     buildDataSyncView() {
       const section = el("div", { className: "zfui-section" });
       section.appendChild(el("div", { className: "zfui-section-title" }, "\u{1F517} \u540C\u6B65\u540E\u7AEF"));
+      section.appendChild(this.buildStatusRow(
+        () => this.dataGroup ? this.dataGroup.getSyncStatuses() : null
+      ));
       const list2 = el("ul", { className: "zfui-backend-list" });
       list2.appendChild(this.buildLocalBackendItem());
       for (const b of this.dataBackends) {
@@ -29451,6 +29565,71 @@ var ZenFSConfigUI = (() => {
       });
       section.appendChild(addBtn);
       return section;
+    }
+    // ── Per-group sync status ────────────────────────────────────────────
+    /**
+     * Build a status row bound to one group. `read` is called repeatedly (timer
+     * + manual refresh) and must never instantiate a group — it only reads from
+     * an already-live instance, or returns null when there is none.
+     */
+    buildStatusRow(read2, unavailable) {
+      const wrap3 = el("div", { className: "zfui-status-block" });
+      const line = el("div", { className: "zfui-status-line" });
+      const textEl = el("span", {}, "\u8BFB\u53D6\u540C\u6B65\u72B6\u6001\u2026");
+      const refreshBtn = el("button", {
+        className: "zfui-status-refresh",
+        type: "button",
+        title: "\u91CD\u65B0\u8BFB\u53D6\u672C\u7EC4\u540C\u6B65\u72B6\u6001\uFF08\u4E0D\u4F1A\u89E6\u53D1\u540C\u6B65\uFF09"
+      }, "\u21BB \u5237\u65B0\u72B6\u6001");
+      on(refreshBtn, "click", () => this.updateStatusRows());
+      line.appendChild(textEl);
+      line.appendChild(refreshBtn);
+      const detailEl = el("div", { className: "zfui-status-detail" });
+      wrap3.appendChild(line);
+      wrap3.appendChild(detailEl);
+      this.statusRefs.push({ textEl, detailEl, read: read2, unavailable });
+      return wrap3;
+    }
+    /** Refresh all visible status rows from their live group instances. */
+    updateStatusRows() {
+      if (this.destroyed) return;
+      for (const ref of this.statusRefs) {
+        if (ref.unavailable) {
+          ref.textEl.textContent = `\u672A\u8FDE\u63A5 \xB7 ${ref.unavailable}`;
+          ref.textEl.parentElement?.classList.add("err");
+          ref.detailEl.textContent = "";
+          continue;
+        }
+        let statuses = null;
+        try {
+          statuses = ref.read();
+        } catch (err2) {
+          ref.textEl.textContent = "\u540C\u6B65\u72B6\u6001\u8BFB\u53D6\u5931\u8D25 \xB7 " + (err2 instanceof Error ? err2.message : String(err2));
+          ref.textEl.parentElement?.classList.add("err");
+          ref.detailEl.textContent = "";
+          continue;
+        }
+        if (!statuses) {
+          ref.textEl.textContent = "\u672A\u8FDE\u63A5 \xB7 \u8BE5\u7EC4\u6CA1\u6709\u5F53\u524D\u4F1A\u8BDD\u7684\u5B9E\u4F8B\uFF0C\u6682\u65E0\u5B9E\u65F6\u72B6\u6001";
+          ref.textEl.parentElement?.classList.add("err");
+          ref.detailEl.textContent = "";
+          continue;
+        }
+        ref.textEl.parentElement?.classList.remove("err");
+        const { text, error: error2 } = formatSyncStatuses(statuses);
+        ref.textEl.textContent = text;
+        ref.detailEl.textContent = error2 ? `\u6700\u540E\u9519\u8BEF ${fmtClock(error2.timestamp)} \xB7 ${String(error2.message).slice(0, 120)}` : "";
+      }
+    }
+    ensureStatusTimer() {
+      if (this.statusTimer !== null || this.destroyed || this.statusRefs.length === 0) return;
+      this.statusTimer = window.setInterval(() => this.updateStatusRows(), STATUS_REFRESH_MS);
+    }
+    stopStatusTimer() {
+      if (this.statusTimer !== null) {
+        window.clearInterval(this.statusTimer);
+        this.statusTimer = null;
+      }
     }
     buildErrorView() {
       const section = el("div", { className: "zfui-section" });

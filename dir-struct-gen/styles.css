@@ -258,7 +258,6 @@ input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px;
 .rs-status { grid-column: 1 / -1; font-size: 12px; }
 .rs-status.ok { color: #1a7f37; }
 .rs-status.err { color: var(--danger); }
-.rs-refresh { grid-column: 1 / -1; justify-self: start; font-size: 12px; }
 /* 同步组配置组件（<sync-group-configurator>）容器 */
 .rs-hint {
   grid-column: 1 / -1;
