@@ -28331,7 +28331,7 @@ var ZenFSConfigUI = (() => {
   }
   async function getConfigBackends(repo) {
     const meta = await repo.getBackends();
-    return meta?.backends ?? [];
+    return (meta?.backends ?? []).filter((b) => b.id !== LOCAL_IDB_BACKEND_ID);
   }
   async function addConfigBackend(repo, id, type, options, description) {
     await repo.addBackend(id, type, options, description);
@@ -28831,6 +28831,7 @@ var ZenFSConfigUI = (() => {
       return { text: "\u540C\u6B65\u5BF9 0 \xB7 \u65E0\u53EF\u7528\u8FDC\u7AEF\u540E\u7AEF\uFF08\u4EC5\u672C\u5730\uFF09" };
     }
     let syncing = false;
+    let watching = 0;
     let lastCheck = 0;
     let totalSyncs = 0;
     let created = 0;
@@ -28841,6 +28842,7 @@ var ZenFSConfigUI = (() => {
     let lastError;
     for (const st of statuses.values()) {
       if (String(st.state) === "syncing") syncing = true;
+      if (st.watching) watching += 1;
       if (st.lastCheckTime) lastCheck = Math.max(lastCheck, st.lastCheckTime);
       totalSyncs += st.totalSyncs || 0;
       const r = st.lastResult;
@@ -28855,7 +28857,7 @@ var ZenFSConfigUI = (() => {
       if (st.lastError) lastError = st.lastError;
     }
     const text = [
-      `\u540C\u6B65\u5BF9 ${statuses.size}`,
+      `\u540C\u6B65\u5BF9 ${statuses.size}\uFF08\u76D1\u542C ${watching}\uFF09`,
       syncing ? "\u540C\u6B65\u4E2D" : "\u7A7A\u95F2",
       `\u6700\u8FD1\u68C0\u67E5 ${fmtClock(lastCheck)}`,
       `\u7D2F\u8BA1 ${totalSyncs} \u6B21`,
@@ -28902,7 +28904,7 @@ var ZenFSConfigUI = (() => {
     }
     // ── Version logging ──────────────────────────────────────────────────
     logVersion() {
-      const uiVersion = true ? "0.3.16" : "dev";
+      const uiVersion = true ? "0.3.17" : "dev";
       console.log(
         `%c[zen-fs-config-ui] v${uiVersion}%c (appId=${this.props.appId})`,
         "color:#2563eb;font-weight:bold",
@@ -29648,8 +29650,8 @@ var ZenFSConfigUI = (() => {
       const li = el("li", { className: "zfui-backend-item zfui-backend-item-primary" });
       li.appendChild(el("div", {}, [
         el("span", { className: "zfui-backend-name" }, "local-idb"),
-        el("span", { className: "zfui-backend-type" }, "IndexedDB"),
-        el("span", { className: "zfui-badge zfui-badge-primary", style: "margin-left:8px" }, "\u672C\u5730\u4E3B\u540E\u7AEF")
+        el("span", { className: "zfui-backend-type" }, localPrimaryType()),
+        el("span", { className: "zfui-badge zfui-badge-primary", style: "margin-left:8px" }, "\u9690\u5F0F source \xB7 \u4E0D\u53C2\u4E0E\u540C\u6B65")
       ]));
       return li;
     }
