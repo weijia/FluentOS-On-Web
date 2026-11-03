@@ -26358,6 +26358,8 @@ var ZenFSConfigUI = (() => {
   var CONFLICTS_DIR = `${META_DIR}/.conflicts`;
   var DELETIONS_DIR = `${META_DIR}/.deleted`;
   var NODES_DIR = "/nodes";
+  var SHARED_DIR = "/shared";
+  var CONFIG_ONLY_PREFIXES = [META_DIR, NODES_DIR, SHARED_DIR];
   var LOCAL_IDB_BACKEND_ID = "local-idb";
   function tombstoneFileName(filePath) {
     return filePath.replace(/^\//, "").replace(/\//g, "__").replace(/\./g, "++") + ".json";
@@ -27876,7 +27878,8 @@ var ZenFSConfigUI = (() => {
             {
               direction: SyncDirection.BiDirectional,
               conflictStrategy: "source-wins",
-              pollIntervalMs: this._pollIntervalMs
+              pollIntervalMs: this._pollIntervalMs,
+              filter: { excludePrefixes: CONFIG_ONLY_PREFIXES }
             },
             "/"
           );
@@ -27922,7 +27925,8 @@ var ZenFSConfigUI = (() => {
         {
           direction: SyncDirection.BiDirectional,
           conflictStrategy: "source-wins",
-          pollIntervalMs: this._pollIntervalMs
+          pollIntervalMs: this._pollIntervalMs,
+          filter: { excludePrefixes: CONFIG_ONLY_PREFIXES }
         },
         "/"
       );
@@ -28808,7 +28812,7 @@ var ZenFSConfigUI = (() => {
     }
     // ── Version logging ──────────────────────────────────────────────────
     logVersion() {
-      const uiVersion = true ? "0.3.12" : "dev";
+      const uiVersion = true ? "0.3.13" : "dev";
       console.log(
         `%c[zen-fs-config-ui] v${uiVersion}%c (appId=${this.props.appId})`,
         "color:#2563eb;font-weight:bold",
