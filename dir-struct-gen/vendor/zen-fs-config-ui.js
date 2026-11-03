@@ -23297,7 +23297,7 @@ var ZenFSConfigUI = (() => {
     }
   });
 
-  // node_modules/zen-fs-config/dist/chunk-M4QTPI6O.mjs
+  // node_modules/zen-fs-config/dist/chunk-S2S3XBK2.mjs
   function registerBackend(type, factory, metadata) {
     registry.set(type, factory);
     if (metadata) {
@@ -23419,6 +23419,9 @@ var ZenFSConfigUI = (() => {
     if (typeof isolatedFS.writeFileWithMtime === "function") {
       backend.writeFileWithMtime = (path, data, mtimeMs) => isolatedFS.writeFileWithMtime(path, data, mtimeMs);
     }
+    if (typeof isolatedFS.shouldSync === "function") {
+      backend.shouldSync = (...args) => isolatedFS.shouldSync(...args);
+    }
     return backend;
   }
   function _cacheGet(key) {
@@ -23466,9 +23469,42 @@ var ZenFSConfigUI = (() => {
       );
     }
   }
+  async function resolveRemoteStorageHref(href) {
+    const raw = String(href ?? "").trim();
+    if (!raw) throw new Error("RemoteStorage href is required.");
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) return raw.replace(/\/+$/, "");
+    const match = raw.match(/^(?:acct:)?([^@/]+)@([^@/]+)$/);
+    if (!match) {
+      throw new Error(
+        `RemoteStorage href "${raw}" is neither an absolute URL nor a user address (user@domain).`
+      );
+    }
+    const user = match[1];
+    const domain = match[2];
+    const webfingerUrl = `https://${domain}/.well-known/webfinger?resource=acct:${encodeURIComponent(user)}@${encodeURIComponent(domain)}`;
+    let response;
+    try {
+      response = await globalThis.fetch(webfingerUrl, {
+        headers: { Accept: "application/jrd+json, application/json" }
+      });
+    } catch (err2) {
+      throw new Error(
+        `RemoteStorage WebFinger request failed (${webfingerUrl}): ${err2 instanceof Error ? err2.message : String(err2)}`
+      );
+    }
+    if (!response.ok) {
+      throw new Error(`RemoteStorage WebFinger lookup failed (HTTP ${response.status}): ${webfingerUrl}`);
+    }
+    const jrd = await response.json();
+    const link5 = (jrd?.links ?? []).find(
+      (item) => item && item.rel === "http://tools.ietf.org/id/draft-dejong-remotestorage" && item.href
+    );
+    if (!link5) throw new Error(`WebFinger response has no RemoteStorage link: ${webfingerUrl}`);
+    return String(link5.href).replace(/\/+$/, "");
+  }
   var registry, metadataRegistry, inMemoryCounter, _memCache, OPTIONAL_BACKEND_GLOBALS;
-  var init_chunk_M4QTPI6O = __esm({
-    "node_modules/zen-fs-config/dist/chunk-M4QTPI6O.mjs"() {
+  var init_chunk_S2S3XBK2 = __esm({
+    "node_modules/zen-fs-config/dist/chunk-S2S3XBK2.mjs"() {
       "use strict";
       registry = /* @__PURE__ */ new Map();
       metadataRegistry = /* @__PURE__ */ new Map();
@@ -23615,7 +23651,7 @@ var ZenFSConfigUI = (() => {
           );
         }
         return new RemoteStorageFileSystem({
-          href: options.href,
+          href: await resolveRemoteStorageHref(options.href),
           token: options.token,
           basePath: options.basePath || void 0,
           preciseMtime: true,
@@ -23626,7 +23662,7 @@ var ZenFSConfigUI = (() => {
         label: "RemoteStorage",
         icon: "\u{1F4E1}",
         fields: [
-          { key: "href", label: "User Address (href)", type: "text", placeholder: "user@5apps.com", required: true },
+          { key: "href", label: "User Address / Storage URL (href)", type: "text", placeholder: "user@5apps.com \u6216 https://storage.5apps.com/user", required: true },
           { key: "token", label: "Bearer Token", type: "password", placeholder: "rs-xxxxxxxx", required: true },
           { key: "basePath", label: "Base Path", type: "text", placeholder: "/zen-fs-config/" }
         ],
@@ -23717,9 +23753,9 @@ var ZenFSConfigUI = (() => {
     }
   });
 
-  // node_modules/zen-fs-config/dist/backend-registry-XFOWB3ZB.mjs
-  var backend_registry_XFOWB3ZB_exports = {};
-  __export(backend_registry_XFOWB3ZB_exports, {
+  // node_modules/zen-fs-config/dist/backend-registry-RBKWNJZI.mjs
+  var backend_registry_RBKWNJZI_exports = {};
+  __export(backend_registry_RBKWNJZI_exports, {
     createBackend: () => createBackend,
     getAccountFields: () => getAccountFields,
     getBackendMetadata: () => getBackendMetadata,
@@ -23731,10 +23767,10 @@ var ZenFSConfigUI = (() => {
     unregisterBackend: () => unregisterBackend,
     wrapZenFSFileSystem: () => wrapZenFSFileSystem
   });
-  var init_backend_registry_XFOWB3ZB = __esm({
-    "node_modules/zen-fs-config/dist/backend-registry-XFOWB3ZB.mjs"() {
+  var init_backend_registry_RBKWNJZI = __esm({
+    "node_modules/zen-fs-config/dist/backend-registry-RBKWNJZI.mjs"() {
       "use strict";
-      init_chunk_M4QTPI6O();
+      init_chunk_S2S3XBK2();
     }
   });
 
@@ -24241,7 +24277,7 @@ var ZenFSConfigUI = (() => {
   });
 
   // node_modules/zen-fs-config/dist/index.mjs
-  init_chunk_M4QTPI6O();
+  init_chunk_S2S3XBK2();
 
   // node_modules/@richard432/localstorage-logger/dist/index.mjs
   var PREFIX = "debug:";
@@ -24452,7 +24488,12 @@ var ZenFSConfigUI = (() => {
     const fsName = fs.backendName || "unknown";
     try {
       await fs.readdir(normalizedRoot);
-    } catch {
+    } catch (err2) {
+      const e = err2;
+      if (e && (e.name === "DirectoryNotFoundError" || e.code === "ENOENT")) {
+        log2(`buildSnapshot(${fsName}): root missing, treating as empty`);
+        return /* @__PURE__ */ new Map();
+      }
       log2(`buildSnapshot(${fsName}): unreachable, returning null`);
       return null;
     }
@@ -25827,7 +25868,7 @@ var ZenFSConfigUI = (() => {
         const pathMod = await Promise.resolve().then(() => (init_stub_path(), stub_path_exports));
         const dir = options.path;
         const store = new FolderStore({ path: dir, label: options.label, fs, pathMod });
-        return (await Promise.resolve().then(() => (init_backend_registry_XFOWB3ZB(), backend_registry_XFOWB3ZB_exports))).wrapZenFSFileSystem({ backend: FolderBackend, path: dir, label: options.label });
+        return (await Promise.resolve().then(() => (init_backend_registry_RBKWNJZI(), backend_registry_RBKWNJZI_exports))).wrapZenFSFileSystem({ backend: FolderBackend, path: dir, label: options.label });
       },
       {
         type: "Folder",
@@ -28298,6 +28339,34 @@ var ZenFSConfigUI = (() => {
     const next = dg.backends.filter((b) => b.id !== backendId);
     await repo.updateAppDataGroupDescriptor(groupId, next);
   }
+  function detectLegacyAppDataGroup(groups) {
+    const group = groups.find((g) => g.id === "app-data");
+    if (!group) return null;
+    const backend = group.backends.find(
+      (b) => b.id === "rs-app" && b.type === "RemoteStorage"
+    );
+    return backend ? { groupId: group.id, backend } : null;
+  }
+  async function migrateLegacyAppDataGroup(repo) {
+    const groups = await repo.listAppDataGroups();
+    const found = detectLegacyAppDataGroup(groups);
+    if (!found) return { migrated: false, targetGroupId: "" };
+    const targetId = "default";
+    if (!groups.some((g) => g.id === targetId)) {
+      await repo.createAppDataGroup(targetId, []);
+    }
+    const targetGroup = await repo.getAppDataGroup(targetId);
+    if (!targetGroup.listBackends().some((b) => b.id === found.backend.id)) {
+      await targetGroup.addBackend(
+        found.backend.id,
+        found.backend.type,
+        found.backend.options,
+        found.backend.description
+      );
+    }
+    await removeAppDataGroup(repo, "app-data");
+    return { migrated: true, targetGroupId: targetId };
+  }
   async function addDataBackend(dataGroup, id, type, options, description) {
     await dataGroup.addBackend(id, type, options, description);
   }
@@ -28722,6 +28791,8 @@ var ZenFSConfigUI = (() => {
       this.configBackends = [];
       this.dataGroups = [];
       this.dataBackends = [];
+      /** Legacy `app-data` group created by older dir-struct-gen versions. */
+      this.legacyAppData = null;
       this.metadata = [];
       this.styleEl = null;
       this.showForm = false;
@@ -28737,7 +28808,7 @@ var ZenFSConfigUI = (() => {
     }
     // ── Version logging ──────────────────────────────────────────────────
     logVersion() {
-      const uiVersion = true ? "0.3.7" : "dev";
+      const uiVersion = true ? "0.3.12" : "dev";
       console.log(
         `%c[zen-fs-config-ui] v${uiVersion}%c (appId=${this.props.appId})`,
         "color:#2563eb;font-weight:bold",
@@ -28983,6 +29054,49 @@ var ZenFSConfigUI = (() => {
       } catch {
         this.dataGroups = [];
       }
+      this.legacyAppData = detectLegacyAppDataGroup(this.dataGroups);
+    }
+    /**
+     * Explicit, user-triggered migration of the legacy `app-data` group.
+     * Copies its RemoteStorage backend into `default`, then removes only the
+     * `app-data` descriptor. Remote files are not deleted.
+     */
+    async handleMigrateLegacyAppData() {
+      if (!this.repo || !this.legacyAppData) return;
+      try {
+        try {
+          localStorage.setItem(
+            "zenfs-config-ui:legacy-app-data-backup",
+            JSON.stringify({ at: Date.now(), match: this.legacyAppData })
+          );
+        } catch {
+        }
+        const result = await migrateLegacyAppDataGroup(this.repo);
+        await this.loadDataGroups();
+        if (result.migrated) {
+          this.error = null;
+          console.log(
+            `[zenfs-config-ui] legacy app-data group migrated to "${result.targetGroupId}" (remote files untouched)`
+          );
+          let migratedGroup;
+          try {
+            migratedGroup = await this.repo.getAppDataGroup(result.targetGroupId);
+          } catch {
+            migratedGroup = void 0;
+          }
+          this.emit("connected", {
+            groupType: this.mode,
+            repo: this.repo,
+            dataGroup: migratedGroup,
+            backendInfo: this.props.backendInfo
+          });
+        }
+        this.render();
+      } catch (err2) {
+        this.error = `\u6E05\u7406\u65E7\u7248 app-data \u7EC4\u5931\u8D25: ${err2 instanceof Error ? err2.message : String(err2)}`;
+        console.error("[zenfs-config-ui] migrate legacy app-data FAILED:", err2);
+        this.render();
+      }
     }
     // ── Actions ──────────────────────────────────────────────────────────
     async handleAddBackend() {
@@ -29221,6 +29335,34 @@ var ZenFSConfigUI = (() => {
       });
       syncSection.appendChild(addBtn);
       frag.appendChild(syncSection);
+      if (this.legacyAppData) {
+        const legacySection = el("div", {
+          className: "zfui-section",
+          style: "border:1px solid #f59e0b;background:#fffbeb;padding:12px;"
+        });
+        legacySection.appendChild(el("div", { className: "zfui-section-title" }, "\u26A0\uFE0F \u68C0\u6D4B\u5230\u65E7\u7248\u9057\u7559\u6570\u636E\u7EC4"));
+        legacySection.appendChild(el("div", {
+          style: "font-size:12px;color:#92400e;line-height:1.6;margin-bottom:8px"
+        }, "\u65E7\u7248 dir-struct-gen \u81EA\u52A8\u521B\u5EFA\u7684 app-data \u7EC4\uFF08\u540E\u7AEF rs-app\uFF09\u4ECD\u4FDD\u5B58\u5728\u914D\u7F6E\u91CC\u3002\u53EF\u5C06\u5176\u540E\u7AEF\u8FC1\u79FB\u5230 default \u7EC4\u540E\u5220\u9664\u8BE5\u7EC4\uFF1B\u53EA\u5220\u9664\u672C\u5730\u63CF\u8FF0\u7B26\uFF0C\u4E0D\u4F1A\u5220\u9664\u8FDC\u7AEF app_data/folders \u4E2D\u7684\u6587\u4EF6\uFF0C\u4E0A\u4F20\u4ECD\u53EF\u7EE7\u7EED\u3002"));
+        const migrateBtn = el("button", { className: "zfui-btn zfui-btn-danger" }, "\u8FC1\u79FB\u5E76\u6E05\u7406");
+        let confirming = false;
+        on(migrateBtn, "click", () => {
+          if (confirming) {
+            confirming = false;
+            migrateBtn.textContent = "\u8FC1\u79FB\u5E76\u6E05\u7406";
+            void this.handleMigrateLegacyAppData();
+          } else {
+            confirming = true;
+            migrateBtn.textContent = "\u786E\u5B9A\u8FC1\u79FB?";
+            window.setTimeout(() => {
+              confirming = false;
+              migrateBtn.textContent = "\u8FC1\u79FB\u5E76\u6E05\u7406";
+            }, 3e3);
+          }
+        });
+        legacySection.appendChild(migrateBtn);
+        frag.appendChild(legacySection);
+      }
       const dgSection = el("div", { className: "zfui-section" });
       dgSection.appendChild(el("div", { className: "zfui-section-title" }, "\u{1F4E6} \u6570\u636E\u540C\u6B65\u7EC4"));
       if (this.dataGroups.length === 0) {

@@ -106,3 +106,16 @@ node serve.js
 ```
 
 任何现代浏览器均可（Chrome / Edge / Firefox / Safari），点开「此电脑」下的盘符即可逐层浏览。
+
+## 更新内置的 zen-fs-config-ui
+
+`vendor/zen-fs-config-ui.js` 是 npm 发布包 `zen-fs-config-ui` 里 `dist/zen-fs-config-ui.js` 的原样副本（Web Component 用的 IIFE bundle），**不要手改**；要升级就重新覆盖：
+
+```powershell
+# 在本目录（dir-struct-gen）下
+node scripts/update-vendor.mjs 0.3.12    # 参数为要使用的 npm 版本
+```
+
+脚本流程：`npm pack zen-fs-config-ui@<version>` → 解包到临时目录 → 校验包内版本 → 复制 `package/dist/zen-fs-config-ui.js` 覆盖 `vendor/` → 打印新旧 SHA256 → 删除临时目录（失败时同样清理并给出明确报错）。若 `package.json` 的 `devDependencies` 里登记了 `zen-fs-config-ui`，可省略版本参数，直接读取该版本。
+
+覆盖后硬刷新页面，确认「数据同步组」区域正常、上传仍可用，再把 `vendor/zen-fs-config-ui.js` 的变更一并提交。
