@@ -18677,10 +18677,17 @@ var ZenFSGitee = (() => {
      * (and the UI) still shows what they typed.
      */
     resolvedBranch = null;
+    /** Raw user-configured branch (may be undefined). Used when bootstrapping an empty repo. */
+    configuredBranch;
+    /** Set once auto-initialization succeeded, so it never runs twice on one instance. */
+    autoInitialized = false;
+    /** First auto-initialization error; repeated sync rounds rethrow it instead of writing again. */
+    autoInitError = null;
     constructor(options) {
       this.token = options.token;
       this.owner = options.owner;
       this.repo = options.repo;
+      this.configuredBranch = options.branch;
       this.branch = options.branch || "master";
       this.baseUrl = options.baseUrl || "https://gitee.com/api/v5";
     }
@@ -18692,6 +18699,10 @@ var ZenFSGitee = (() => {
     get fellBackToDefaultBranch() {
       return this.resolvedBranch !== null && this.resolvedBranch !== this.branch;
     }
+    /** True when an empty repository was bootstrapped with an initial commit. */
+    get autoInitializedEmptyRepo() {
+      return this.autoInitialized;
+    }
     static httpStatus(err2) {
       const msg = err2 instanceof Error ? err2.message : String(err2);
       const match = /Gitee API (\d+)/.exec(msg);
@@ -18699,13 +18710,10 @@ var ZenFSGitee = (() => {
     }
     /**
      * The tree endpoint returns 404 both for "repo missing/no permission" and
-     * "branch missing", so on a 404 ask the repository metadata (and, for empty
-     * repos, the branch list) which case we are in.
-     *
-     * @returns The default branch to retry with, or `null` when the caller
-     *          should surface the original 404.
+     * "branch missing", so on a 404 ask the repository metadata and branch list
+     * which case we are in.
      */
-    async resolveBranchFallback() {
+    async readRepoState() {
       let meta;
       try {
         meta = await this.request(`/repos/${this.owner}/${this.repo}`);
@@ -18718,7 +18726,7 @@ var ZenFSGitee = (() => {
         log2.log(
           `\u8BFB\u53D6\u4ED3\u5E93\u4FE1\u606F\u5931\u8D25\uFF08${err2 instanceof Error ? err2.message : String(err2)}\uFF09\uFF0C\u4FDD\u7559\u539F\u59CB\u5206\u652F\u9519\u8BEF`
         );
-        return null;
+        return { branchCount: null };
       }
       let branchCount = null;
       try {
@@ -18726,31 +18734,60 @@ var ZenFSGitee = (() => {
         branchCount = Array.isArray(list2) ? list2.length : null;
       } catch {
       }
-      if (branchCount === 0) {
-        throw new Error(
-          `Gitee \u4ED3\u5E93 ${this.owner}/${this.repo} \u4E3A\u7A7A\uFF08\u65E0\u4EFB\u4F55\u5206\u652F/\u63D0\u4EA4\uFF09\uFF0C\u65E0\u6CD5\u8BFB\u53D6\u6587\u4EF6\u6811\uFF1A\u8BF7\u5148\u5728 Gitee \u7F51\u9875\u4E0A\u5B8C\u6210\u4E00\u6B21\u521D\u59CB\u5316\u63D0\u4EA4\uFF08\u4F8B\u5982\u521B\u5EFA README\uFF09\u540E\u518D\u91CD\u8BD5`
-        );
+      return { defaultBranch: meta?.default_branch || void 0, branchCount };
+    }
+    /**
+     * Bootstrap an empty repository through the Contents API: creating
+     * `README.md` produces the first commit. `POST /branches` is unusable here
+     * because it requires an existing `refs` start point.
+     *
+     * Runs at most once per instance. On failure the error is cached so later
+     * sync rounds never write again.
+     */
+    async initializeEmptyRepository(defaultBranch) {
+      if (this.autoInitialized) return;
+      if (this.autoInitError) throw this.autoInitError;
+      const targetBranch = this.configuredBranch || defaultBranch || "master";
+      const content = `# ${this.repo}
+
+\u7531 zen-fs \u521D\u59CB\u5316
+`;
+      try {
+        await this.request(`/repos/${this.owner}/${this.repo}/contents/README.md?branch=${targetBranch}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            content: encodeBase64(new TextEncoder().encode(content)),
+            message: "chore: \u521D\u59CB\u5316\u4ED3\u5E93\uFF08zen-fs \u81EA\u52A8\u521B\u5EFA\uFF09"
+          })
+        });
+      } catch (err2) {
+        const status = _GiteeAPI.httpStatus(err2);
+        const detail = err2 instanceof Error ? err2.message : String(err2);
+        const readable = status === 403 ? new Error(
+          `Gitee \u4ED3\u5E93 ${this.owner}/${this.repo} \u4E3A\u7A7A\uFF0C\u81EA\u52A8\u521D\u59CB\u5316\u88AB\u62D2\u7EDD\uFF1Atoken \u7F3A\u5C11\u5199\u5165\u6743\u9650\uFF08\u9700\u8981 projects \u8BFB\u5199\u6743\u9650\uFF09`
+        ) : status === 404 ? new Error(
+          `Gitee \u4ED3\u5E93 ${this.owner}/${this.repo} \u4E0D\u5B58\u5728\u6216\u65E0\u6743\u8BBF\u95EE\uFF0C\u65E0\u6CD5\u81EA\u52A8\u521D\u59CB\u5316`
+        ) : new Error(`Gitee \u4ED3\u5E93 ${this.owner}/${this.repo} \u4E3A\u7A7A\uFF0C\u81EA\u52A8\u521D\u59CB\u5316\u5931\u8D25\uFF1A${detail}`);
+        this.autoInitError = readable;
+        throw readable;
       }
-      const defaultBranch = meta?.default_branch || void 0;
-      if (!defaultBranch || defaultBranch === this.branch) {
-        log2.log(
-          `\u6307\u5B9A\u5206\u652F '${this.branch}' \u4E0D\u5B58\u5728\uFF0C\u4E14\u6CA1\u6709\u53EF\u7528\u7684\u9ED8\u8BA4\u5206\u652F\uFF08\u4ED3\u5E93\u672A\u8FD4\u56DE default_branch\uFF09\uFF0C\u4FDD\u7559\u539F\u59CB\u9519\u8BEF`
-        );
-        return null;
-      }
-      log2.log(`\u6307\u5B9A\u5206\u652F '${this.branch}' \u4E0D\u5B58\u5728\uFF0C\u5DF2\u56DE\u843D\u5230\u9ED8\u8BA4\u5206\u652F '${defaultBranch}'`);
-      return defaultBranch;
+      this.autoInitialized = true;
+      this.resolvedBranch = targetBranch;
+      log2.log(`\u4ED3\u5E93\u4E3A\u7A7A\uFF0C\u5DF2\u81EA\u52A8\u521B\u5EFA\u521D\u59CB\u63D0\u4EA4\uFF08\u5206\u652F ${targetBranch}\uFF09`);
     }
     async request(path, init2) {
       const separator = path.includes("?") ? "&" : "?";
       const url = `${this.baseUrl}${path}${separator}access_token=${this.token}`;
-      verboseLog(`request: ${init2?.method || "GET"} ${url}`);
+      const mask = (value) => !value || !this.token ? value ?? "" : value.split(this.token).join("***");
+      verboseLog(`request: ${init2?.method || "GET"} ${mask(url)}`);
       const response = await fetch(url, init2);
-      verboseLog(`response: status=${response.status} url=${response.url} type=${response.headers.get("content-type")}`);
+      verboseLog(`response: status=${response.status} url=${mask(response.url)} type=${response.headers.get("content-type")}`);
       if (!response.ok) {
         const text = await response.text().catch(() => "");
-        log2.log(`ERROR body: ${text.substring(0, 500)}`);
-        throw new Error(`Gitee API ${response.status}: ${text}`);
+        const safeText = mask(text);
+        log2.log(`ERROR body: ${safeText.substring(0, 500)}`);
+        throw new Error(`Gitee API ${response.status}: ${safeText}`);
       }
       if (response.status === 204) return void 0;
       const contentType = response.headers.get("content-type") || "";
@@ -18769,11 +18806,32 @@ var ZenFSGitee = (() => {
         return data.tree || [];
       } catch (err2) {
         if (_GiteeAPI.httpStatus(err2) !== 404) throw err2;
-        const fallback = await this.resolveBranchFallback();
-        if (!fallback) throw err2;
-        const data = await this.request(treePath(fallback));
-        this.resolvedBranch = fallback;
-        return data.tree || [];
+        const state = await this.readRepoState();
+        if (state.branchCount === 0) {
+          await this.initializeEmptyRepository(state.defaultBranch);
+          try {
+            const data = await this.request(treePath(this.currentBranch));
+            return data.tree || [];
+          } catch (retryErr) {
+            if (_GiteeAPI.httpStatus(retryErr) === 404) {
+              throw new Error(
+                `Gitee \u4ED3\u5E93 ${this.owner}/${this.repo} \u4E3A\u7A7A\uFF0C\u81EA\u52A8\u521D\u59CB\u5316\u540E\u4ECD\u65E0\u6CD5\u8BFB\u53D6\u6587\u4EF6\u6811\uFF08\u5206\u652F '${this.currentBranch}'\uFF09`
+              );
+            }
+            throw retryErr;
+          }
+        }
+        const defaultBranch = state.defaultBranch;
+        if (defaultBranch && defaultBranch !== this.branch) {
+          log2.log(`\u6307\u5B9A\u5206\u652F '${this.branch}' \u4E0D\u5B58\u5728\uFF0C\u5DF2\u56DE\u843D\u5230\u9ED8\u8BA4\u5206\u652F '${defaultBranch}'`);
+          this.resolvedBranch = defaultBranch;
+          const data = await this.request(treePath(defaultBranch));
+          return data.tree || [];
+        }
+        log2.log(
+          `\u6307\u5B9A\u5206\u652F '${this.branch}' \u4E0D\u5B58\u5728\uFF0C\u4E14\u6CA1\u6709\u53EF\u7528\u7684\u9ED8\u8BA4\u5206\u652F\uFF08\u4ED3\u5E93\u672A\u8FD4\u56DE default_branch\uFF09\uFF0C\u4FDD\u7559\u539F\u59CB\u9519\u8BEF`
+        );
+        throw err2;
       }
     }
     /**
@@ -18840,9 +18898,15 @@ var ZenFSGitee = (() => {
         });
         return data?.content?.sha || "";
       } catch (err2) {
-        if (_GiteeAPI.httpStatus(err2) === 404) {
+        const status = _GiteeAPI.httpStatus(err2);
+        if (status === 403) {
           throw new Error(
-            `Gitee \u4ED3\u5E93 ${this.owner}/${this.repo} \u65E0\u6CD5\u5199\u5165\uFF1A\u5206\u652F '${this.currentBranch}' \u4E0D\u5B58\u5728\u6216\u4ED3\u5E93\u4E3A\u7A7A\u3002\u82E5\u4ED3\u5E93\u4E3A\u7A7A\uFF0C\u8BF7\u5148\u5728 Gitee \u7F51\u9875\u4E0A\u5B8C\u6210\u4E00\u6B21\u521D\u59CB\u5316\u63D0\u4EA4\uFF08\u4F8B\u5982\u521B\u5EFA README\uFF09\u540E\u518D\u5199\u5165`
+            `Gitee \u4ED3\u5E93 ${this.owner}/${this.repo} \u65E0\u6CD5\u5199\u5165\uFF1Atoken \u7F3A\u5C11\u5199\u5165\u6743\u9650\uFF08\u9700\u8981 projects \u8BFB\u5199\u6743\u9650\uFF09`
+          );
+        }
+        if (status === 404) {
+          throw new Error(
+            `Gitee \u4ED3\u5E93 ${this.owner}/${this.repo} \u65E0\u6CD5\u5199\u5165\uFF1A\u5206\u652F '${this.currentBranch}' \u4E0D\u5B58\u5728\u6216\u4ED3\u5E93\u4E3A\u7A7A\uFF08\u81EA\u52A8\u521D\u59CB\u5316\u672A\u5B8C\u6210\uFF0C\u8BF7\u67E5\u770B\u540C\u6B65\u65E5\u5FD7\u4E2D\u7684\u521D\u59CB\u5316\u9519\u8BEF\uFF09`
           );
         }
         throw err2;
@@ -19098,7 +19162,8 @@ var ZenFSGitee = (() => {
     }
     /**
      * Initialize the file system by loading the repository tree.
-     * If the configured branch does not exist, it will be created from 'master'.
+     * If the configured branch does not exist, falls back to the repository's
+     * default branch. An empty repository is bootstrapped with one initial commit.
      *
      * Warm start: persistent caches (shaCache, contentCache, mtimeCache) are
      * loaded from IndexedDB first, so file contents from the previous session
@@ -19113,6 +19178,11 @@ var ZenFSGitee = (() => {
       if (this.api.fellBackToDefaultBranch) {
         log3.log(
           `configured branch '${this.options.branch}' was not found; using default branch '${this.api.currentBranch}'`
+        );
+      }
+      if (this.api.autoInitializedEmptyRepo) {
+        log3.log(
+          `repository was empty; created an initial commit on branch '${this.api.currentBranch}'`
         );
       }
       const freshPaths = /* @__PURE__ */ new Set();
