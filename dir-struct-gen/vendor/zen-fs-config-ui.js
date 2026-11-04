@@ -25643,24 +25643,50 @@ var ZenFSConfigUI = (() => {
     const joined = resolved.join("/");
     return root === "/" ? `/${joined}` : `${root}/${joined}`;
   }
-  function createChrootFS(inner, root) {
+  function makeEnoent(userPath) {
+    const err2 = new Error(`ENOENT: no such file or directory, '${userPath}'`);
+    err2.code = "ENOENT";
+    return err2;
+  }
+  function createChrootFS(inner, root, options = {}) {
     const normalizedRoot = root.replace(/\\/g, "/").replace(/\/+$/, "") || "/";
+    const hiddenPrefixes = (options.hiddenPrefixes ?? []).map(
+      (p) => p.startsWith("/") ? p.replace(/\/+$/, "") : `/${p}`.replace(/\/+$/, "")
+    );
     function rp(path) {
       return resolveChroot(normalizedRoot, path);
     }
+    function isHidden(absolutePath) {
+      return hiddenPrefixes.some(
+        (prefix) => absolutePath === prefix || absolutePath.startsWith(`${prefix}/`)
+      );
+    }
+    function visible(path) {
+      const absolute = rp(path);
+      if (isHidden(absolute)) throw makeEnoent(path);
+      return absolute;
+    }
     const promises = {
       async readFile(path, encoding) {
-        return inner.readFile(rp(path), encoding);
+        return inner.readFile(visible(path), encoding);
       },
-      async writeFile(path, data, options) {
-        await ensureParentDir(rp(path));
-        return inner.writeFile(rp(path), data, options);
+      async writeFile(path, data, writeOptions) {
+        const target = visible(path);
+        await ensureParentDir(target);
+        await inner.writeFile(target, data, writeOptions);
+        if (options.onWrite) await options.onWrite(path, data);
       },
       async readdir(path) {
-        return inner.readdir(rp(path));
+        const entries2 = await inner.readdir(visible(path));
+        if (hiddenPrefixes.length === 0) return entries2;
+        const dirPath = rp(path);
+        return entries2.filter((entry) => {
+          const child = dirPath === "/" ? `/${entry}` : `${dirPath}/${entry}`;
+          return !isHidden(child);
+        });
       },
       async stat(path) {
-        const s = await inner.stat(rp(path));
+        const s = await inner.stat(visible(path));
         return {
           mode: typeof s.mode === "number" ? s.mode : void 0,
           size: s.size ?? 0,
@@ -25668,26 +25694,25 @@ var ZenFSConfigUI = (() => {
         };
       },
       async access(path) {
-        const exists3 = await inner.exists(rp(path));
-        if (!exists3) {
-          const err2 = new Error(`ENOENT: no such file or directory, access '${path}'`);
-          err2.code = "ENOENT";
-          throw err2;
-        }
+        const exists3 = await inner.exists(visible(path));
+        if (!exists3) throw makeEnoent(path);
       },
-      async mkdir(path, options) {
-        return inner.mkdir(rp(path), options);
+      async mkdir(path, mkdirOptions) {
+        return inner.mkdir(visible(path), mkdirOptions);
       },
       async unlink(path) {
-        return inner.unlink(rp(path));
+        const target = visible(path);
+        if (options.onUnlink) return options.onUnlink(target);
+        return inner.unlink(target);
       },
       async rmdir(path) {
-        return inner.rmdir?.(rp(path));
+        return inner.rmdir?.(visible(path));
       },
       async rename(oldPath, newPath) {
-        return inner.rename?.(rp(oldPath), rp(newPath));
+        return inner.rename?.(visible(oldPath), visible(newPath));
       },
       async exists(path) {
+        if (isHidden(rp(path))) return false;
         return inner.exists(rp(path));
       }
     };
@@ -25697,17 +25722,17 @@ var ZenFSConfigUI = (() => {
           "zen-fs-config: readFileSync is not supported. Use repo.fs.promises.readFile() or repo.getConfig() instead."
         );
       },
-      writeFileSync(path, data, options) {
-        promises.writeFile(path, data, options).catch(() => {
+      writeFileSync(path, data, writeOptions) {
+        promises.writeFile(path, data, writeOptions).catch(() => {
         });
       },
       existsSync(path) {
         throw new Error(
-          "zen-fs-config: existsSync is not supported. Use repo.fs.promises.exists() instead."
+          "zen-fs-config: existsSync is not supported. Use repo.fs.promises.exists() or repo.getConfig() instead."
         );
       },
-      mkdirSync(path, options) {
-        promises.mkdir(path, options).catch(() => {
+      mkdirSync(path, mkdirOptions) {
+        promises.mkdir(path, mkdirOptions).catch(() => {
         });
       },
       readdirSync(path) {
@@ -26367,18 +26392,356 @@ var ZenFSConfigUI = (() => {
     }
     return result;
   }
-  var log23 = createLogger("zen-fs-config:config-repo");
   var META_DIR = "/.meta";
-  var GROUP_TYPE_FILE = `${META_DIR}/group-type`;
+  var GROUP_DESCRIPTOR_FILE = `${META_DIR}/group.json`;
+  var TOMBSTONES_DIR = `${META_DIR}/tombstones`;
+  var LEGACY_TOMBSTONES_DIR = `${META_DIR}/.deleted`;
+  var VERSIONS_DIR = `${META_DIR}/versions`;
+  var CONFLICTS_DIR = `${META_DIR}/conflicts`;
+  var LEGACY_CONFLICTS_DIR = `${META_DIR}/.conflicts`;
+  var CONFIG_DIR = "/.config";
+  var DATA_GROUP_DEFAULT_FEATURES = {
+    tombstones: true,
+    versions: false,
+    conflicts: false,
+    configHost: false,
+    appData: true
+  };
+  function toBytes(raw) {
+    if (raw instanceof Uint8Array) return raw;
+    if (raw instanceof ArrayBuffer) return new Uint8Array(raw);
+    if (typeof raw === "string") return new TextEncoder().encode(raw);
+    return new Uint8Array(raw);
+  }
+  async function ensureParentDir2(fs, filePath) {
+    const parts = filePath.split("/").filter(Boolean);
+    parts.pop();
+    let current = "";
+    for (const part of parts) {
+      current += `/${part}`;
+      try {
+        await fs.mkdir(current);
+      } catch {
+      }
+    }
+  }
+  async function readJson(fs, path) {
+    try {
+      const raw = await fs.readFile(path);
+      return JSON.parse(new TextDecoder().decode(toBytes(raw)));
+    } catch {
+      return null;
+    }
+  }
+  async function writeJson(fs, path, value) {
+    await ensureParentDir2(fs, path);
+    await fs.writeFile(path, new TextEncoder().encode(JSON.stringify(value, null, 2)));
+  }
+  async function existsSafe(fs, path) {
+    try {
+      if (typeof fs.exists === "function") return await fs.exists(path);
+      await fs.readFile(path);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  function encodeMetaPath(filePath) {
+    const normalized = filePath.startsWith("/") ? filePath : `/${filePath}`;
+    return normalized.replace(/^\//, "").replace(/\//g, "__").replace(/\./g, "++");
+  }
+  function readGroupDescriptor(fs) {
+    return readJson(fs, GROUP_DESCRIPTOR_FILE);
+  }
+  async function writeGroupDescriptor(fs, descriptor) {
+    await writeJson(fs, GROUP_DESCRIPTOR_FILE, { ...descriptor, updatedAt: Date.now() });
+  }
+  var TombstoneStore = class {
+    constructor(fs, author) {
+      __publicField(this, "fs");
+      __publicField(this, "author");
+      this.fs = fs;
+      this.author = author;
+    }
+    pathFor(filePath, dir = TOMBSTONES_DIR) {
+      return `${dir}/${encodeMetaPath(filePath)}.json`;
+    }
+    /** All tombstones, new path first, legacy only for paths not already seen. */
+    async list() {
+      const byPath = /* @__PURE__ */ new Map();
+      for (const dir of [TOMBSTONES_DIR, LEGACY_TOMBSTONES_DIR]) {
+        let entries2;
+        try {
+          entries2 = await this.fs.readdir(dir);
+        } catch {
+          continue;
+        }
+        for (const entry of entries2) {
+          if (!entry.endsWith(".json")) continue;
+          const data = await readJson(this.fs, `${dir}/${entry}`);
+          if (!data || typeof data.path !== "string") continue;
+          const prev = byPath.get(data.path);
+          if (prev) {
+            for (const id of data.confirmedBy ?? []) {
+              if (!prev.confirmedBy.includes(id)) prev.confirmedBy.push(id);
+            }
+          } else {
+            byPath.set(data.path, data);
+          }
+        }
+      }
+      return Array.from(byPath.values());
+    }
+    /** Write a tombstone (new + legacy mirror). */
+    async write(tombstone) {
+      const bytes = new TextEncoder().encode(JSON.stringify(tombstone, null, 2));
+      const paths = [
+        this.pathFor(tombstone.path),
+        this.pathFor(tombstone.path, LEGACY_TOMBSTONES_DIR)
+      ];
+      for (const p of paths) {
+        await ensureParentDir2(this.fs, p);
+        await this.fs.writeFile(p, bytes);
+      }
+    }
+    /** Persist an updated tombstone (confirmations) to whichever paths exist. */
+    async save(tombstone) {
+      const bytes = new TextEncoder().encode(JSON.stringify(tombstone, null, 2));
+      for (const dir of [TOMBSTONES_DIR, LEGACY_TOMBSTONES_DIR]) {
+        const p = this.pathFor(tombstone.path, dir);
+        if (!await existsSafe(this.fs, p)) continue;
+        await this.fs.writeFile(p, bytes);
+      }
+    }
+    /** Delete a tombstone from both layouts. */
+    async remove(tombstone) {
+      for (const dir of [TOMBSTONES_DIR, LEGACY_TOMBSTONES_DIR]) {
+        const p = this.pathFor(tombstone.path, dir);
+        if (!await existsSafe(this.fs, p)) continue;
+        try {
+          await this.fs.unlink(p);
+        } catch {
+        }
+      }
+    }
+    /**
+     * Delete every tombstoned file (and its version record) on the local store
+     * and on each target backend, so bi-directional sync cannot resurrect it.
+     */
+    async process(targets = []) {
+      const tombstones = await this.list();
+      for (const tombstone of tombstones) {
+        await this.deleteEverywhere(this.fs, tombstone.path);
+        for (const target of targets) {
+          await this.deleteEverywhere(target.fs, tombstone.path);
+        }
+      }
+    }
+    async deleteEverywhere(fs, filePath) {
+      if (!await existsSafe(fs, filePath)) return;
+      try {
+        await fs.unlink(filePath);
+      } catch {
+      }
+    }
+    /** Add the given backend ids to every tombstone's confirmation set. */
+    async confirm(backendIds) {
+      const tombstones = await this.list();
+      let modified = 0;
+      for (const tombstone of tombstones) {
+        let changed = false;
+        for (const id of backendIds) {
+          if (!tombstone.confirmedBy.includes(id)) {
+            tombstone.confirmedBy.push(id);
+            changed = true;
+          }
+        }
+        if (!changed) continue;
+        try {
+          await this.save(tombstone);
+          modified++;
+        } catch {
+        }
+      }
+      return modified;
+    }
+    /** Remove tombstones confirmed by every connected backend (and their mirrors). */
+    async gc(allBackendIds, targets = []) {
+      const tombstones = await this.list();
+      for (const tombstone of tombstones) {
+        const allConfirmed = allBackendIds.every((id) => tombstone.confirmedBy.includes(id));
+        if (!allConfirmed) continue;
+        for (const dir of [TOMBSTONES_DIR, LEGACY_TOMBSTONES_DIR]) {
+          const p = this.pathFor(tombstone.path, dir);
+          if (await existsSafe(this.fs, p)) {
+            try {
+              await this.fs.unlink(p);
+            } catch {
+            }
+          }
+          for (const target of targets) {
+            if (await existsSafe(target.fs, p)) {
+              try {
+                await target.fs.unlink(p);
+              } catch {
+              }
+            }
+          }
+        }
+      }
+    }
+  };
+  var VersionStore = class {
+    constructor(fs, author) {
+      __publicField(this, "fs");
+      __publicField(this, "author");
+      this.fs = fs;
+      this.author = author;
+    }
+    /** `null` for metadata paths and version files themselves. */
+    pathFor(filePath) {
+      const normalized = filePath.startsWith("/") ? filePath : `/${filePath}`;
+      if (normalized.startsWith(`${META_DIR}/`)) return null;
+      if (normalized.endsWith(".version")) return null;
+      return `${VERSIONS_DIR}/${encodeMetaPath(normalized)}.json`;
+    }
+    async read(filePath) {
+      const p = this.pathFor(filePath);
+      if (!p) return null;
+      return readJson(this.fs, p);
+    }
+    async record(filePath, content) {
+      const p = this.pathFor(filePath);
+      if (!p) return null;
+      const prev = await this.read(filePath);
+      const hash = await sha256(content);
+      if (prev && prev.hash === hash) return prev;
+      const meta = {
+        version: (prev?.version ?? 0) + 1,
+        hash,
+        author: this.author,
+        timestamp: Date.now()
+      };
+      await writeJson(this.fs, p, meta);
+      return meta;
+    }
+    async remove(filePath) {
+      const p = this.pathFor(filePath);
+      if (!p || !await existsSafe(this.fs, p)) return;
+      try {
+        await this.fs.unlink(p);
+      } catch {
+      }
+    }
+  };
+  var ConflictStore = class {
+    constructor(fs, appId, nodeId, versions) {
+      __publicField(this, "fs");
+      __publicField(this, "appId");
+      __publicField(this, "nodeId");
+      __publicField(this, "versions");
+      this.fs = fs;
+      this.appId = appId;
+      this.nodeId = nodeId;
+      this.versions = versions;
+    }
+    /** Persist source/target backups + meta.json. Returns the archive record. */
+    async archive(conflict, timestamp2 = Date.now()) {
+      const conflictId = `${timestamp2}_${conflict.path.replace(/\//g, "_")}`;
+      const dir = `${CONFLICTS_DIR}/${conflictId}`;
+      await ensureParentDir2(this.fs, `${dir}/meta.json`);
+      await this.fs.writeFile(`${dir}/source`, new TextEncoder().encode(conflict.sourceContent));
+      await this.fs.writeFile(`${dir}/target`, new TextEncoder().encode(conflict.targetContent));
+      const sourceVersion = (await this.versions.read(conflict.path))?.version ?? 0;
+      const archive = {
+        conflictPath: conflict.path,
+        timestamp: timestamp2,
+        sourceAuthor: `${this.appId}/${this.nodeId}`,
+        targetAuthor: "unknown",
+        sourceVersion,
+        targetVersion: 0,
+        ...conflict.resolvedWith ? { resolvedStrategy: conflict.resolvedWith } : {},
+        sourceBackupPath: "./source",
+        targetBackupPath: "./target"
+      };
+      await writeJson(this.fs, `${dir}/meta.json`, archive);
+      return archive;
+    }
+    /** All archives, new layout first, legacy entries only when not shadowed. */
+    async list() {
+      const seen = /* @__PURE__ */ new Set();
+      const archives = [];
+      for (const dir of [CONFLICTS_DIR, LEGACY_CONFLICTS_DIR]) {
+        let entries2;
+        try {
+          entries2 = await this.fs.readdir(dir);
+        } catch {
+          continue;
+        }
+        for (const entry of entries2) {
+          if (seen.has(entry)) continue;
+          const archive = await readJson(this.fs, `${dir}/${entry}/meta.json`);
+          if (!archive) continue;
+          seen.add(entry);
+          archives.push(archive);
+        }
+      }
+      return archives.sort((a, b) => a.timestamp - b.timestamp);
+    }
+    candidatesFor(conflictId) {
+      const id = conflictId.replace(/\/meta\.json$/, "");
+      return [`${CONFLICTS_DIR}/${id}`, `${LEGACY_CONFLICTS_DIR}/${id}`];
+    }
+    async readBackup(conflictId, fileType) {
+      for (const dir of this.candidatesFor(conflictId)) {
+        const p = `${dir}/${fileType}`;
+        try {
+          return new TextDecoder().decode(toBytes(await this.fs.readFile(p)));
+        } catch {
+        }
+      }
+      throw new Error(`Conflict backup not found: ${conflictId}/${fileType}`);
+    }
+    /** Resolve a conflict with raw (already serialized) content. */
+    async resolve(conflictId, mergedContent) {
+      for (const dir of this.candidatesFor(conflictId)) {
+        const metaPath = `${dir}/meta.json`;
+        const archive = await readJson(this.fs, metaPath);
+        if (!archive) continue;
+        const bytes = typeof mergedContent === "string" ? new TextEncoder().encode(mergedContent) : mergedContent;
+        await ensureParentDir2(this.fs, archive.conflictPath);
+        await this.fs.writeFile(archive.conflictPath, bytes);
+        await this.versions.record(archive.conflictPath, bytes);
+        await this.fs.writeFile(`${dir}/resolved`, bytes);
+        archive.resolvedBackupPath = "./resolved";
+        await writeJson(this.fs, metaPath, archive);
+        return;
+      }
+      throw new Error(`Failed to resolve conflict ${conflictId}: archive not found`);
+    }
+  };
+  var log23 = createLogger("zen-fs-config:config-repo");
+  var GROUP_DESCRIPTOR_FILE2 = `${META_DIR}/group.json`;
+  var GROUP_TYPE_FILE = `${CONFIG_DIR}/group-type`;
+  var LEGACY_GROUP_TYPE_FILE = `${META_DIR}/group-type`;
   var BACKENDS_FILE = `${META_DIR}/backends.json`;
-  var BACKENDS_DIR = `${META_DIR}/backends`;
-  var APP_DATA_GROUPS_DIR = `${META_DIR}/app-data-groups`;
-  var CONFIG_SYNC_GROUP_FILE = `${META_DIR}/config-sync-group.json`;
+  var BACKENDS_DIR = `${CONFIG_DIR}/backends`;
+  var LEGACY_BACKENDS_DIR = `${META_DIR}/backends`;
+  var APP_DATA_GROUPS_DIR = `${CONFIG_DIR}/app-data-groups`;
+  var LEGACY_APP_DATA_GROUPS_DIR = `${META_DIR}/app-data-groups`;
+  var CONFIG_SYNC_GROUP_FILE = `${CONFIG_DIR}/config-sync-group.json`;
+  var LEGACY_CONFIG_SYNC_GROUP_FILE = `${META_DIR}/config-sync-group.json`;
   var GROUP_NAME_MAX_LENGTH = 40;
-  var CONFLICTS_DIR = `${META_DIR}/.conflicts`;
-  var DELETIONS_DIR = `${META_DIR}/.deleted`;
   var NODES_DIR = "/nodes";
   var SHARED_DIR = "/shared";
+  var CONFIG_GROUP_ID = "config";
+  var CONFIG_GROUP_FEATURES = {
+    tombstones: true,
+    versions: true,
+    conflicts: true,
+    configHost: true,
+    appData: false
+  };
   function normalizeGroupName(value) {
     if (typeof value !== "string") {
       throw new Error("Group name must be a string");
@@ -26392,10 +26755,13 @@ var ZenFSConfigUI = (() => {
     }
     return name;
   }
-  var CONFIG_ONLY_PREFIXES = [META_DIR, NODES_DIR, SHARED_DIR];
+  var CONFIG_ONLY_PREFIXES = [CONFIG_DIR, NODES_DIR, SHARED_DIR];
   var LOCAL_IDB_BACKEND_ID = "local-idb";
   function tombstoneFileName(filePath) {
-    return filePath.replace(/^\//, "").replace(/\//g, "__").replace(/\./g, "++") + ".json";
+    return `${encodeMetaPath(filePath)}.json`;
+  }
+  function tombstonePathFor(filePath, dir = TOMBSTONES_DIR) {
+    return `${dir}/${tombstoneFileName(filePath)}`;
   }
   function stableOptionsKey(options) {
     if (!options || typeof options !== "object") return "{}";
@@ -26457,6 +26823,13 @@ var ZenFSConfigUI = (() => {
     constructor(appId, nodeId, primaryBackendId, cachedFS, serializer, onConflict, pollIntervalMs, cacheOptions) {
       __publicField(this, "appId");
       __publicField(this, "nodeId");
+      /** Fixed id for the unified sync-group model. */
+      __publicField(this, "groupId", CONFIG_GROUP_ID);
+      __publicField(this, "kind", "config");
+      /** Capability switches — the config group is the superset. */
+      __publicField(this, "features", CONFIG_GROUP_FEATURES);
+      /** Display name, hydrated from `.config/config-sync-group.json`. */
+      __publicField(this, "name");
       /** Chroot-isolated fs for app-facing API. Typed as `any` to match `typeof import('node:fs')` duck-typically. */
       __publicField(this, "fs");
       /** Un-chrooted fs for low-level browsing. */
@@ -26475,6 +26848,10 @@ var ZenFSConfigUI = (() => {
       __publicField(this, "pollIntervalMs");
       /** Tombstone cache — avoids redundant reads within a single flush() cycle. */
       __publicField(this, "tombstoneCache", null);
+      /** Per-backend sync state (successful pairs + connect failures). */
+      __publicField(this, "backendStates", /* @__PURE__ */ new Map());
+      /** Last known backend descriptors, for the synchronous unified handle API. */
+      __publicField(this, "backendDescriptorCache", []);
       /**
        * Tracks the background initial sync started by createConfigRepo().
        * `flush()` and `dispose()` will await this if it hasn't completed yet,
@@ -26669,18 +27046,18 @@ var ZenFSConfigUI = (() => {
     async deleteFile(path) {
       this.assertNotDisposed();
       const normalizedPath = path.startsWith("/") ? path : "/" + path;
-      const tombstonePath = `${DELETIONS_DIR}/${tombstoneFileName(normalizedPath)}`;
       const tombstone = {
         path: normalizedPath,
         deletedAt: Date.now(),
         deletedBy: this.primaryBackendId,
         confirmedBy: [this.primaryBackendId]
       };
-      await this.ensureDir(tombstonePath);
-      await this.cachedFS.writeFile(
-        tombstonePath,
-        new TextEncoder().encode(JSON.stringify(tombstone, null, 2))
-      );
+      const tombstoneBytes = new TextEncoder().encode(JSON.stringify(tombstone, null, 2));
+      for (const dir of [TOMBSTONES_DIR, LEGACY_TOMBSTONES_DIR]) {
+        const tombstonePath = tombstonePathFor(normalizedPath, dir);
+        await this.ensureDir(tombstonePath);
+        await this.cachedFS.writeFile(tombstonePath, tombstoneBytes);
+      }
       try {
         await this.cachedFS.unlink(normalizedPath);
       } catch {
@@ -26692,7 +27069,7 @@ var ZenFSConfigUI = (() => {
         } catch {
         }
       }
-      log23.log(`[ConfigRepo] deleteFile: ${normalizedPath} (tombstone at ${tombstonePath})`);
+      log23.log(`[ConfigRepo] deleteFile: ${normalizedPath} (tombstone at ${tombstonePathFor(normalizedPath)})`);
       this.invalidateTombstoneCache();
       this.schedulePostDeleteSync();
     }
@@ -26716,24 +27093,33 @@ var ZenFSConfigUI = (() => {
       if (this.tombstoneCache !== null) {
         return this.tombstoneCache;
       }
-      try {
-        const entries2 = await this.cachedFS.readdir(DELETIONS_DIR);
-        const tombstones = [];
+      const byPath = /* @__PURE__ */ new Map();
+      for (const dir of [TOMBSTONES_DIR, LEGACY_TOMBSTONES_DIR]) {
+        let entries2;
+        try {
+          entries2 = await this.cachedFS.readdir(dir);
+        } catch {
+          continue;
+        }
         for (const entry of entries2) {
           if (!entry.endsWith(".json")) continue;
           try {
-            const raw = await this.cachedFS.readFile(`${DELETIONS_DIR}/${entry}`);
+            const raw = await this.cachedFS.readFile(`${dir}/${entry}`);
             const data = JSON.parse(new TextDecoder().decode(toUint8Array22(raw)));
-            tombstones.push(data);
+            const prev = byPath.get(data.path);
+            if (prev) {
+              for (const id of data.confirmedBy ?? []) {
+                if (!prev.confirmedBy.includes(id)) prev.confirmedBy.push(id);
+              }
+            } else {
+              byPath.set(data.path, data);
+            }
           } catch {
           }
         }
-        this.tombstoneCache = tombstones;
-        return tombstones;
-      } catch {
-        this.tombstoneCache = [];
-        return [];
       }
+      this.tombstoneCache = Array.from(byPath.values());
+      return this.tombstoneCache;
     }
     /** Invalidate the tombstone cache — call after tombstones are modified. */
     invalidateTombstoneCache() {
@@ -26976,7 +27362,6 @@ var ZenFSConfigUI = (() => {
       if (tombstones.length === 0) return;
       let modified = 0;
       for (const tombstone of tombstones) {
-        const tombstonePath = `${DELETIONS_DIR}/${tombstoneFileName(tombstone.path)}`;
         let changed = false;
         for (const replicaId of this.replicaBackends.keys()) {
           if (!tombstone.confirmedBy.includes(replicaId)) {
@@ -26986,10 +27371,13 @@ var ZenFSConfigUI = (() => {
         }
         if (changed) {
           try {
-            await this.cachedFS.writeFile(
-              tombstonePath,
-              new TextEncoder().encode(JSON.stringify(tombstone, null, 2))
-            );
+            const bytes = new TextEncoder().encode(JSON.stringify(tombstone, null, 2));
+            for (const dir of [TOMBSTONES_DIR, LEGACY_TOMBSTONES_DIR]) {
+              const tombstonePath = tombstonePathFor(tombstone.path, dir);
+              if (await this.safeExists(this.cachedFS, tombstonePath)) {
+                await this.cachedFS.writeFile(tombstonePath, bytes);
+              }
+            }
             modified++;
           } catch {
           }
@@ -27013,20 +27401,22 @@ var ZenFSConfigUI = (() => {
       for (const tombstone of tombstones) {
         const allConfirmed = allBackendIds.every((id) => tombstone.confirmedBy.includes(id));
         if (allConfirmed) {
-          const tombstonePath = `${DELETIONS_DIR}/${tombstoneFileName(tombstone.path)}`;
-          try {
-            await this.cachedFS.unlink(tombstonePath);
-          } catch {
-          }
-          for (const [replicaId, replica] of this.replicaBackends) {
-            if (await this.safeExists(replica.instance, tombstonePath)) {
-              try {
-                await replica.instance.unlink(tombstonePath);
-              } catch {
+          for (const dir of [TOMBSTONES_DIR, LEGACY_TOMBSTONES_DIR]) {
+            const tombstonePath = tombstonePathFor(tombstone.path, dir);
+            try {
+              await this.cachedFS.unlink(tombstonePath);
+            } catch {
+            }
+            for (const [, replica] of this.replicaBackends) {
+              if (await this.safeExists(replica.instance, tombstonePath)) {
+                try {
+                  await replica.instance.unlink(tombstonePath);
+                } catch {
+                }
               }
             }
+            log23.log(`[ConfigRepo] gcTombstones: removed ${tombstonePath} (all ${allBackendIds.length} backends confirmed)`);
           }
-          log23.log(`[ConfigRepo] gcTombstones: removed ${tombstonePath} (all ${allBackendIds.length} backends confirmed)`);
         }
       }
     }
@@ -27051,17 +27441,46 @@ var ZenFSConfigUI = (() => {
       this.assertNotDisposed();
       return this.syncEngine.getStatusAll();
     }
+    /**
+     * Per-backend sync state. Includes replica descriptors that failed to connect
+     * (they have no sync pair, so they never show up in getSyncStatuses()).
+     */
+    getBackendSyncStates() {
+      this.assertNotDisposed();
+      return new Map(this.backendStates);
+    }
+    /** Registered replica backend descriptors (excludes the implicit local primary). */
+    listBackends() {
+      this.assertNotDisposed();
+      return [...this.backendDescriptorCache];
+    }
+    /** Update the config-sync group's display name only. */
+    async rename(name) {
+      this.assertNotDisposed();
+      const descriptor = await this.updateConfigSyncGroupDescriptor({ name });
+      this.name = descriptor.name;
+    }
     // -----------------------------------------------------------------------
     // IConfigRepo — Conflict Management
     // -----------------------------------------------------------------------
     async resolveConflict(conflictId, mergedContent) {
       this.assertNotDisposed();
-      const metaPath = `${CONFLICTS_DIR}/${conflictId}`;
+      let metaPath = null;
+      let archive = null;
+      for (const dir of [CONFLICTS_DIR, LEGACY_CONFLICTS_DIR]) {
+        const candidate = `${dir}/${conflictId}`;
+        try {
+          const raw = await this.cachedFS.readFile(candidate);
+          archive = JSON.parse(new TextDecoder().decode(toUint8Array22(raw)));
+          metaPath = candidate;
+          break;
+        } catch {
+        }
+      }
+      if (!metaPath || !archive) {
+        throw new Error(`Failed to resolve conflict ${conflictId}: archive not found`);
+      }
       try {
-        const raw = await this.cachedFS.readFile(metaPath);
-        const archive = JSON.parse(
-          new TextDecoder().decode(toUint8Array22(raw))
-        );
         const configPath = archive.conflictPath;
         const bytes = this.serializer.serialize(mergedContent, configPath);
         await this.cachedFS.writeFile(configPath, bytes);
@@ -27089,29 +27508,41 @@ var ZenFSConfigUI = (() => {
     async listConflicts() {
       this.assertNotDisposed();
       const archives = [];
-      try {
-        const entries2 = await this.cachedFS.readdir(CONFLICTS_DIR);
+      const seen = /* @__PURE__ */ new Set();
+      for (const dir of [CONFLICTS_DIR, LEGACY_CONFLICTS_DIR]) {
+        let entries2;
+        try {
+          entries2 = await this.cachedFS.readdir(dir);
+        } catch {
+          continue;
+        }
         for (const entry of entries2) {
-          const metaPath = `${CONFLICTS_DIR}/${entry}/meta.json`;
+          if (seen.has(entry)) continue;
+          const metaPath = `${dir}/${entry}/meta.json`;
           try {
             const raw = await this.cachedFS.readFile(metaPath);
             const archive = JSON.parse(
               new TextDecoder().decode(toUint8Array22(raw))
             );
+            seen.add(entry);
             archives.push(archive);
           } catch {
           }
         }
-      } catch {
       }
       return archives.sort((a, b) => a.timestamp - b.timestamp);
     }
     async readConflictBackup(conflictId, fileType) {
       this.assertNotDisposed();
-      const conflictDir = `${CONFLICTS_DIR}/${conflictId}`.replace(/\/meta\.json$/, "");
-      const filePath = `${conflictDir}/${fileType}`;
-      const raw = await this.cachedFS.readFile(filePath);
-      return new TextDecoder().decode(toUint8Array22(raw));
+      for (const dir of [CONFLICTS_DIR, LEGACY_CONFLICTS_DIR]) {
+        const conflictDir = `${dir}/${conflictId}`.replace(/\/meta\.json$/, "");
+        try {
+          const raw = await this.cachedFS.readFile(`${conflictDir}/${fileType}`);
+          return new TextDecoder().decode(toUint8Array22(raw));
+        } catch {
+        }
+      }
+      throw new Error(`Conflict backup not found: ${conflictId}/${fileType}`);
     }
     // -----------------------------------------------------------------------
     // IConfigRepo — Lifecycle
@@ -27189,6 +27620,7 @@ var ZenFSConfigUI = (() => {
             "/"
           );
           this.replicaBackends.set(desc.id, { instance: fsInstance, syncable, pairId: pair.pairId });
+          this.backendStates.set(desc.id, { backendId: desc.id, pairId: pair.pairId });
           const conflictHandler = (event) => {
             this.handleConflict(event);
           };
@@ -27196,6 +27628,13 @@ var ZenFSConfigUI = (() => {
           log23.log(`[ConfigRepo] Replica ${desc.id} created, sync pair=${pair.pairId}`);
         } catch (err2) {
           log23.error(`[ConfigRepo] Failed to create replica ${desc.id} (${desc.type}):`, err2);
+          this.backendStates.set(desc.id, {
+            backendId: desc.id,
+            error: {
+              message: err2 instanceof Error ? err2.message : String(err2),
+              timestamp: Date.now()
+            }
+          });
         }
       }
       log23.log(`[ConfigRepo] setupSync complete. Replicas:`, Array.from(this.replicaBackends.keys()));
@@ -27391,95 +27830,119 @@ var ZenFSConfigUI = (() => {
     // -----------------------------------------------------------------------
     // Internal — Individual Backend Descriptor Files
     // -----------------------------------------------------------------------
-    /** Path for a single backend descriptor: .meta/backends/{id}.json */
+    /** Path for a single backend descriptor: .config/backends/{id}.json */
     backendFilePath(id) {
       return `${BACKENDS_DIR}/${id}.json`;
     }
+    /** Legacy path: .meta/backends/{id}.json (read + dual-write for one cycle). */
+    legacyBackendFilePath(id) {
+      return `${LEGACY_BACKENDS_DIR}/${id}.json`;
+    }
+    /** Read every parseable descriptor in one directory. */
+    async readBackendDescriptorsFrom(dir) {
+      let entries2;
+      try {
+        entries2 = await this.cachedFS.readdir(dir);
+      } catch {
+        return { items: [], corruptFiles: [] };
+      }
+      const jsonEntries = entries2.filter((e) => e.endsWith(".json"));
+      const readResults = await Promise.all(
+        jsonEntries.map(async (entry) => {
+          const filePath = `${dir}/${entry}`;
+          try {
+            const raw = await this.cachedFS.readFile(filePath);
+            const desc = JSON.parse(new TextDecoder().decode(toUint8Array22(raw)));
+            if (desc.id && desc.type) {
+              let mtime = 0;
+              try {
+                const stat5 = await this.cachedFS.stat(filePath);
+                mtime = stat5.mtimeMs ?? 0;
+              } catch {
+              }
+              return { kind: "ok", desc, mtime };
+            } else {
+              log23.warn(`[ConfigRepo] Backend descriptor ${entry} is missing id/type fields, marking for cleanup`);
+              return { kind: "corrupt", filePath };
+            }
+          } catch (parseErr) {
+            log23.warn(`[ConfigRepo] Backend descriptor ${entry} has corrupted JSON: ${parseErr}. Marking for cleanup.`);
+            return { kind: "corrupt", filePath };
+          }
+        })
+      );
+      const items = [];
+      const corruptFiles = [];
+      for (const result of readResults) {
+        if (result.kind === "ok") {
+          items.push({ desc: result.desc, mtime: result.mtime });
+        } else {
+          corruptFiles.push(result.filePath);
+        }
+      }
+      return { items, corruptFiles };
+    }
     /**
-     * Read all backend descriptors from .meta/backends/*.json.
+     * Read all backend descriptors from `.config/backends/*.json` with legacy
+     * `.meta/backends/*.json` as a one-cycle fallback (new layout wins by id).
      *
      * If duplicate backends are detected (same type + options but different id),
      * only the first one (sorted by id) is kept and the rest are removed
      * (including their version sidecar files).
      */
     async readAllBackendDescriptors() {
-      try {
-        const entries2 = await this.cachedFS.readdir(BACKENDS_DIR);
-        const jsonEntries = entries2.filter((e) => e.endsWith(".json"));
-        const readResults = await Promise.all(
-          jsonEntries.map(async (entry) => {
-            const filePath = `${BACKENDS_DIR}/${entry}`;
-            try {
-              const raw = await this.cachedFS.readFile(filePath);
-              const desc = JSON.parse(new TextDecoder().decode(toUint8Array22(raw)));
-              if (desc.id && desc.type) {
-                let mtime = 0;
-                try {
-                  const stat5 = await this.cachedFS.stat(filePath);
-                  mtime = stat5.mtimeMs ?? 0;
-                } catch {
-                }
-                return { kind: "ok", desc, mtime };
-              } else {
-                log23.warn(`[ConfigRepo] Backend descriptor ${entry} is missing id/type fields, marking for cleanup`);
-                return { kind: "corrupt", filePath };
-              }
-            } catch (parseErr) {
-              log23.warn(`[ConfigRepo] Backend descriptor ${entry} has corrupted JSON: ${parseErr}. Marking for cleanup.`);
-              return { kind: "corrupt", filePath };
-            }
-          })
-        );
-        const items = [];
-        const corruptFiles = [];
-        for (const result of readResults) {
-          if (result.kind === "ok") {
-            items.push({ desc: result.desc, mtime: result.mtime });
-          } else {
-            corruptFiles.push(result.filePath);
-          }
+      const fresh = await this.readBackendDescriptorsFrom(BACKENDS_DIR);
+      const legacy = await this.readBackendDescriptorsFrom(LEGACY_BACKENDS_DIR);
+      const items = [...fresh.items];
+      const seenIds = new Set(items.map((i) => i.desc.id));
+      for (const item of legacy.items) {
+        if (!seenIds.has(item.desc.id)) {
+          items.push(item);
+          seenIds.add(item.desc.id);
         }
-        for (const corruptPath of corruptFiles) {
-          for (const [, replica] of this.replicaBackends) {
-            try {
-              await replica.instance.unlink(corruptPath);
-            } catch {
-            }
-            await this.unlinkVersionSidecar(replica.instance, corruptPath);
-          }
+      }
+      const corruptFiles = [...fresh.corruptFiles, ...legacy.corruptFiles];
+      for (const corruptPath of corruptFiles) {
+        for (const [, replica] of this.replicaBackends) {
           try {
-            await this.deleteFile(corruptPath);
+            await replica.instance.unlink(corruptPath);
           } catch {
-            try {
-              await this.cachedFS.unlink(corruptPath);
-            } catch {
-            }
-            await this.unlinkVersionSidecar(this.cachedFS, corruptPath);
           }
+          await this.unlinkVersionSidecar(replica.instance, corruptPath);
         }
-        const seen = /* @__PURE__ */ new Map();
-        const duplicates = [];
-        for (const item of items) {
-          const key = backendDedupKey(item.desc);
-          const existing = seen.get(key);
-          if (existing) {
-            if (item.mtime < existing.mtime) {
-              duplicates.push(existing.desc.id);
-              seen.set(key, item);
-            } else {
-              duplicates.push(item.desc.id);
-            }
-          } else {
+        try {
+          await this.deleteFile(corruptPath);
+        } catch {
+          try {
+            await this.cachedFS.unlink(corruptPath);
+          } catch {
+          }
+          await this.unlinkVersionSidecar(this.cachedFS, corruptPath);
+        }
+      }
+      const seen = /* @__PURE__ */ new Map();
+      const duplicates = [];
+      for (const item of items) {
+        const key = backendDedupKey(item.desc);
+        const existing = seen.get(key);
+        if (existing) {
+          if (item.mtime < existing.mtime) {
+            duplicates.push(existing.desc.id);
             seen.set(key, item);
+          } else {
+            duplicates.push(item.desc.id);
           }
+        } else {
+          seen.set(key, item);
         }
-        if (duplicates.length > 0) {
-          log23.log(
-            `[ConfigRepo] readAllBackendDescriptors: removing ${duplicates.length} duplicate(s): ${duplicates.join(", ")}`
-          );
-          for (const dupId of duplicates) {
-            const descPath = this.backendFilePath(dupId);
-            for (const [replicaId, replica] of this.replicaBackends) {
+      }
+      if (duplicates.length > 0) {
+        log23.log(
+          `[ConfigRepo] readAllBackendDescriptors: removing ${duplicates.length} duplicate(s): ${duplicates.join(", ")}`
+        );
+        for (const dupId of duplicates) {
+          for (const descPath of [this.backendFilePath(dupId), this.legacyBackendFilePath(dupId)]) {
+            for (const [, replica] of this.replicaBackends) {
               try {
                 await replica.instance.unlink(descPath);
               } catch {
@@ -27489,33 +27952,47 @@ var ZenFSConfigUI = (() => {
             try {
               await this.deleteFile(descPath);
             } catch {
-              await this.removeBackendDescriptor(dupId);
+              try {
+                await this.cachedFS.unlink(descPath);
+              } catch {
+              }
+              await this.unlinkVersionSidecar(this.cachedFS, descPath);
             }
           }
         }
-        return Array.from(seen.values()).map((i) => i.desc);
-      } catch {
-        return [];
       }
+      const result = Array.from(seen.values()).map((i) => i.desc);
+      this.backendDescriptorCache = result;
+      return result;
     }
-    /** Write a single backend descriptor as .meta/backends/{id}.json */
+    /**
+     * Write a single backend descriptor to `.config/backends/{id}.json`,
+     * mirroring to the legacy `.meta/backends/{id}.json` for one release cycle
+     * so older clients still see the backend.
+     */
     async writeBackendDescriptor(desc) {
-      const path = this.backendFilePath(desc.id);
-      await this.ensureDir(path);
-      const bytes = new TextEncoder().encode(JSON.stringify(desc, null, 2));
-      await this.cachedFS.writeFile(path, bytes);
       const author = `${this.appId}/${this.nodeId}`;
-      const version2 = await incrementVersion(this.fullFS, path, bytes, author);
-      await this.writeVersionSidecar(path, version2);
-    }
-    /** Remove a single backend descriptor file + its version sidecar */
-    async removeBackendDescriptor(id) {
-      const path = this.backendFilePath(id);
-      try {
-        await this.cachedFS.unlink(path);
-      } catch {
+      const bytes = new TextEncoder().encode(JSON.stringify(desc, null, 2));
+      for (const path of [this.backendFilePath(desc.id), this.legacyBackendFilePath(desc.id)]) {
+        await this.ensureDir(path);
+        await this.cachedFS.writeFile(path, bytes);
+        const version2 = await incrementVersion(this.fullFS, path, bytes, author);
+        await this.writeVersionSidecar(path, version2);
       }
-      await this.unlinkVersionSidecar(this.cachedFS, path);
+      const existing = this.backendDescriptorCache.findIndex((b) => b.id === desc.id);
+      if (existing >= 0) this.backendDescriptorCache[existing] = { ...desc };
+      else this.backendDescriptorCache.push({ ...desc });
+    }
+    /** Remove a single backend descriptor file + its version sidecar (both layouts) */
+    async removeBackendDescriptor(id) {
+      for (const path of [this.backendFilePath(id), this.legacyBackendFilePath(id)]) {
+        try {
+          await this.cachedFS.unlink(path);
+        } catch {
+        }
+        await this.unlinkVersionSidecar(this.cachedFS, path);
+      }
+      this.backendDescriptorCache = this.backendDescriptorCache.filter((b) => b.id !== id);
     }
     // -----------------------------------------------------------------------
     // IConfigRepo — Meta file access (no chroot)
@@ -27617,6 +28094,7 @@ var ZenFSConfigUI = (() => {
         "/"
       );
       this.replicaBackends.set(id, { instance, syncable, pairId: pair.pairId });
+      this.backendStates.set(id, { backendId: id, pairId: pair.pairId });
       const conflictHandler = (event) => {
         this.handleConflict(event);
       };
@@ -27632,17 +28110,19 @@ var ZenFSConfigUI = (() => {
         throw new Error("Cannot remove the local IndexedDB primary backend");
       }
       const replica = this.replicaBackends.get(id);
-      const descPath = this.backendFilePath(id);
+      const descPaths = [this.backendFilePath(id), this.legacyBackendFilePath(id)];
       if (replica) {
-        try {
-          await replica.instance.unlink(descPath);
-        } catch {
-        }
-        await this.unlinkVersionSidecar(replica.instance, descPath);
-        try {
-          await this.deleteFile(descPath);
-        } catch {
-          await this.removeBackendDescriptor(id);
+        for (const descPath of descPaths) {
+          try {
+            await replica.instance.unlink(descPath);
+          } catch {
+          }
+          await this.unlinkVersionSidecar(replica.instance, descPath);
+          try {
+            await this.deleteFile(descPath);
+          } catch {
+            await this.removeBackendDescriptor(id);
+          }
         }
         this.syncEngine.removePair(replica.pairId);
         log23.log(`[ConfigRepo] removeBackend: sync pair ${replica.pairId} removed`);
@@ -27652,12 +28132,15 @@ var ZenFSConfigUI = (() => {
         }
       } else {
         log23.log(`[ConfigRepo] removeBackend: "${id}" not in replicaBackends, cleaning up descriptor only`);
-        try {
-          await this.deleteFile(descPath);
-        } catch {
-          await this.removeBackendDescriptor(id);
+        for (const descPath of descPaths) {
+          try {
+            await this.deleteFile(descPath);
+          } catch {
+            await this.removeBackendDescriptor(id);
+          }
         }
       }
+      this.backendStates.delete(id);
       this.schedulePostDeleteSync();
       log23.log(`[ConfigRepo] removeBackend: ${id} removed (tombstone written, remote cleaned)`);
     }
@@ -27721,37 +28204,68 @@ var ZenFSConfigUI = (() => {
     /** Write the group-type marker file if it doesn't exist. */
     async ensureGroupType(type) {
       this.assertNotDisposed();
-      try {
-        const existing = await this.cachedFS.readFile(GROUP_TYPE_FILE, "utf-8");
-        const current = existing.trim();
-        if (current && current !== type) {
-          log23.warn(`[ConfigRepo] group-type already set to "${current}", ignoring request to set "${type}"`);
-          return;
+      for (const path of [GROUP_TYPE_FILE, LEGACY_GROUP_TYPE_FILE]) {
+        try {
+          const existing = await this.cachedFS.readFile(path, "utf-8");
+          const current = existing.trim();
+          if (current && current !== type) {
+            log23.warn(`[ConfigRepo] group-type already set to "${current}" at ${path}, ignoring request to set "${type}"`);
+            return;
+          }
+        } catch {
         }
-      } catch {
       }
-      await this.ensureDir(GROUP_TYPE_FILE);
-      await this.cachedFS.writeFile(GROUP_TYPE_FILE, new TextEncoder().encode(type));
+      const bytes = new TextEncoder().encode(type);
+      for (const path of [GROUP_TYPE_FILE, LEGACY_GROUP_TYPE_FILE]) {
+        if (await this.safeExists(this.cachedFS, path)) continue;
+        await this.ensureDir(path);
+        await this.cachedFS.writeFile(path, bytes);
+      }
+      if (!await readGroupDescriptor(this.cachedFS)) {
+        await writeGroupDescriptor(this.cachedFS, {
+          schemaVersion: 1,
+          kind: "config",
+          id: CONFIG_GROUP_ID,
+          ...this.name ? { name: this.name } : {},
+          features: CONFIG_GROUP_FEATURES
+        });
+      }
       log23.log(`[ConfigRepo] group-type set to "${type}"`);
     }
-    /** Read the group-type marker. Returns null if not set. */
+    /** Read the group-type marker. Returns null if not set (new path, then legacy). */
     async getGroupType() {
       this.assertNotDisposed();
-      try {
-        const raw = await this.cachedFS.readFile(GROUP_TYPE_FILE, "utf-8");
-        const type = raw.trim();
-        if (type === "config-sync" || type === "data-sync") return type;
-        return null;
-      } catch {
-        return null;
+      for (const path of [GROUP_TYPE_FILE, LEGACY_GROUP_TYPE_FILE]) {
+        try {
+          const raw = await this.cachedFS.readFile(path, "utf-8");
+          const type = raw.trim();
+          if (type === "config-sync" || type === "data-sync") return type;
+        } catch {
+        }
       }
+      return null;
     }
     // -----------------------------------------------------------------------
     // IConfigRepo — App Data Groups (data-sync groups)
     // -----------------------------------------------------------------------
-    /** Path for a single app data group descriptor: .meta/app-data-groups/{appId}/{id}.json */
+    /** Path for a single app data group descriptor: .config/app-data-groups/{appId}/{id}.json */
     appDataGroupFilePath(id) {
       return `${APP_DATA_GROUPS_DIR}/${this.appId}/${id}.json`;
+    }
+    /** Legacy descriptor path: .meta/app-data-groups/{appId}/{id}.json */
+    legacyAppDataGroupFilePath(id) {
+      return `${LEGACY_APP_DATA_GROUPS_DIR}/${this.appId}/${id}.json`;
+    }
+    /** Write a data-group descriptor to the new path, mirroring to the legacy one. */
+    async writeAppDataGroupDescriptorFile(id, descriptor) {
+      const bytes = new TextEncoder().encode(JSON.stringify(descriptor, null, 2));
+      const author = `${this.appId}/${this.nodeId}`;
+      for (const descPath of [this.appDataGroupFilePath(id), this.legacyAppDataGroupFilePath(id)]) {
+        await this.ensureDir(descPath);
+        await this.cachedFS.writeFile(descPath, bytes);
+        const version2 = await incrementVersion(this.fullFS, descPath, bytes, author);
+        await this.writeVersionSidecar(descPath, version2);
+      }
     }
     /**
      * Resolve a backend descriptor's options by merging account fields
@@ -27768,7 +28282,33 @@ var ZenFSConfigUI = (() => {
       }
       return mergeAccountFields(desc.type, accountBackend.options, desc.options);
     }
-    async createAppDataGroup(id, backends) {
+    /**
+     * Reject two groups pointing at the exact same remote endpoint. Two groups
+     * syncing the same files independently would fight over deletions and
+     * tombstones (see SYNC-GROUP-UNIFICATION §4.3).
+     */
+    async assertNoSharedRemote(backends, ownerId) {
+      const candidates = new Set(backends.map((b) => backendDedupKey(b)));
+      if (candidates.size === 0) return;
+      for (const backend of await this.readAllBackendDescriptors()) {
+        if (candidates.has(backendDedupKey(backend))) {
+          throw new Error(
+            `\u6570\u636E\u7EC4\u300C${ownerId}\u300D\u7684\u540E\u7AEF\u300C${backend.id}\u300D\u4E0E\u914D\u7F6E\u540C\u6B65\u7EC4\u540E\u7AEF\u6307\u5411\u540C\u4E00\u8FDC\u7AEF\uFF08\u7C7B\u578B\u4E0E\u53C2\u6570\u5B8C\u5168\u76F8\u540C\uFF09\uFF0C\u4E24\u4E2A\u7EC4\u4E0D\u80FD\u5171\u7528\u540C\u4E00\u8FDC\u7AEF\u76EE\u5F55\uFF0C\u8BF7\u6539\u7528\u4E0D\u540C\u7684 basePath/repo`
+          );
+        }
+      }
+      for (const other of await this.listAppDataGroups()) {
+        if (other.id === ownerId) continue;
+        for (const backend of other.backends) {
+          if (candidates.has(backendDedupKey(backend))) {
+            throw new Error(
+              `\u6570\u636E\u7EC4\u300C${ownerId}\u300D\u7684\u540E\u7AEF\u300C${backend.id}\u300D\u4E0E\u6570\u636E\u7EC4\u300C${other.id}\u300D\u7684\u540E\u7AEF\u300C${backend.id}\u300D\u6307\u5411\u540C\u4E00\u8FDC\u7AEF\uFF08\u7C7B\u578B\u4E0E\u53C2\u6570\u5B8C\u5168\u76F8\u540C\uFF09\uFF0C\u8BF7\u4E3A\u5176\u4E2D\u4E00\u4E2A\u7EC4\u66F4\u6362 basePath`
+            );
+          }
+        }
+      }
+    }
+    async createAppDataGroup(id, backends, options = {}) {
       this.assertNotDisposed();
       if (this.appDataGroups.has(id)) {
         throw new Error(`App data group "${id}" already exists. Use removeAppDataGroup() first.`);
@@ -27779,26 +28319,24 @@ var ZenFSConfigUI = (() => {
         const mergedOptions = await this.resolveAppDataBackendOptions(desc);
         resolvedBackends.push({ ...desc, options: mergedOptions });
       }
+      await this.assertNoSharedRemote(resolvedBackends, id);
       const group = new AppDataGroupImpl(
         id,
         this.appId,
         resolvedBackends,
         this.pollIntervalMs,
-        this
+        this,
+        { name: options.name, features: options.features }
       );
       await group.init();
       const descriptor = {
         id,
         groupType: "data-sync",
+        ...options.name ? { name: options.name } : {},
+        ...options.features ? { features: options.features } : {},
         backends: resolvedBackends
       };
-      const descPath = this.appDataGroupFilePath(id);
-      await this.ensureDir(descPath);
-      const bytes = new TextEncoder().encode(JSON.stringify(descriptor, null, 2));
-      await this.cachedFS.writeFile(descPath, bytes);
-      const author = `${this.appId}/${this.nodeId}`;
-      const version2 = await incrementVersion(this.fullFS, descPath, bytes, author);
-      await this.writeVersionSidecar(descPath, version2);
+      await this.writeAppDataGroupDescriptorFile(id, descriptor);
       this.appDataGroups.set(id, group);
       log23.log(`[ConfigRepo] createAppDataGroup: "${id}" created`);
       return group;
@@ -27815,15 +28353,10 @@ var ZenFSConfigUI = (() => {
         id,
         groupType: "data-sync",
         ...existing?.name ? { name: existing.name } : {},
+        ...existing?.features ? { features: existing.features } : {},
         backends
       };
-      const descPath = this.appDataGroupFilePath(id);
-      await this.ensureDir(descPath);
-      const bytes = new TextEncoder().encode(JSON.stringify(descriptor, null, 2));
-      await this.cachedFS.writeFile(descPath, bytes);
-      const author = `${this.appId}/${this.nodeId}`;
-      const version2 = await incrementVersion(this.fullFS, descPath, bytes, author);
-      await this.writeVersionSidecar(descPath, version2);
+      await this.writeAppDataGroupDescriptorFile(id, descriptor);
     }
     /**
      * Change a data-sync group's display name only. `id`, backends, local stores
@@ -27842,13 +28375,7 @@ var ZenFSConfigUI = (() => {
         groupType: "data-sync",
         name: normalized
       };
-      const descPath = this.appDataGroupFilePath(id);
-      await this.ensureDir(descPath);
-      const bytes = new TextEncoder().encode(JSON.stringify(descriptor, null, 2));
-      await this.cachedFS.writeFile(descPath, bytes);
-      const author = `${this.appId}/${this.nodeId}`;
-      const version2 = await incrementVersion(this.fullFS, descPath, bytes, author);
-      await this.writeVersionSidecar(descPath, version2);
+      await this.writeAppDataGroupDescriptorFile(id, descriptor);
     }
     /**
      * Replace a data-sync backend's parameters in place (same backend id).
@@ -27919,13 +28446,15 @@ var ZenFSConfigUI = (() => {
     }
     async getConfigSyncGroupDescriptor() {
       this.assertNotDisposed();
-      try {
-        const raw = await this.cachedFS.readFile(CONFIG_SYNC_GROUP_FILE);
-        const parsed = JSON.parse(new TextDecoder().decode(toUint8Array22(raw)));
-        if (parsed && parsed.groupType === "config-sync") {
-          return parsed;
+      for (const path of [CONFIG_SYNC_GROUP_FILE, LEGACY_CONFIG_SYNC_GROUP_FILE]) {
+        try {
+          const raw = await this.cachedFS.readFile(path);
+          const parsed = JSON.parse(new TextDecoder().decode(toUint8Array22(raw)));
+          if (parsed && parsed.groupType === "config-sync") {
+            return parsed;
+          }
+        } catch {
         }
-      } catch {
       }
       return null;
     }
@@ -27940,22 +28469,33 @@ var ZenFSConfigUI = (() => {
         groupType: "config-sync",
         name: normalized
       };
-      await this.ensureDir(CONFIG_SYNC_GROUP_FILE);
       const bytes = new TextEncoder().encode(JSON.stringify(descriptor, null, 2));
-      await this.cachedFS.writeFile(CONFIG_SYNC_GROUP_FILE, bytes);
       const author = `${this.appId}/${this.nodeId}`;
-      const version2 = await incrementVersion(this.fullFS, CONFIG_SYNC_GROUP_FILE, bytes, author);
-      await this.writeVersionSidecar(CONFIG_SYNC_GROUP_FILE, version2);
+      for (const path of [CONFIG_SYNC_GROUP_FILE, LEGACY_CONFIG_SYNC_GROUP_FILE]) {
+        await this.ensureDir(path);
+        await this.cachedFS.writeFile(path, bytes);
+        const version2 = await incrementVersion(this.fullFS, path, bytes, author);
+        await this.writeVersionSidecar(path, version2);
+      }
+      await writeGroupDescriptor(this.cachedFS, {
+        schemaVersion: 1,
+        kind: "config",
+        id: CONFIG_GROUP_ID,
+        name: normalized,
+        features: CONFIG_GROUP_FEATURES
+      });
       return descriptor;
     }
     async readAppDataGroupDescriptor(id) {
-      try {
-        const raw = await this.cachedFS.readFile(this.appDataGroupFilePath(id));
-        const parsed = JSON.parse(new TextDecoder().decode(toUint8Array22(raw)));
-        if (parsed && parsed.id === id && parsed.groupType === "data-sync") {
-          return parsed;
+      for (const descPath of [this.appDataGroupFilePath(id), this.legacyAppDataGroupFilePath(id)]) {
+        try {
+          const raw = await this.cachedFS.readFile(descPath);
+          const parsed = JSON.parse(new TextDecoder().decode(toUint8Array22(raw)));
+          if (parsed && parsed.id === id && parsed.groupType === "data-sync") {
+            return parsed;
+          }
+        } catch {
         }
-      } catch {
       }
       return null;
     }
@@ -27963,45 +28503,48 @@ var ZenFSConfigUI = (() => {
       this.assertNotDisposed();
       const cached = this.appDataGroups.get(id);
       if (cached) return cached;
-      const descPath = this.appDataGroupFilePath(id);
-      try {
-        const raw = await this.cachedFS.readFile(descPath);
-        const descriptor = JSON.parse(new TextDecoder().decode(toUint8Array22(raw)));
-        const group = new AppDataGroupImpl(
-          id,
-          this.appId,
-          descriptor.backends,
-          this.pollIntervalMs,
-          this
-        );
-        await group.init();
-        this.appDataGroups.set(id, group);
-        return group;
-      } catch {
+      const descriptor = await this.readAppDataGroupDescriptor(id);
+      if (!descriptor) {
         throw new Error(`App data group "${id}" not found`);
       }
+      const group = new AppDataGroupImpl(
+        id,
+        this.appId,
+        descriptor.backends,
+        this.pollIntervalMs,
+        this,
+        descriptor
+      );
+      await group.init();
+      this.appDataGroups.set(id, group);
+      return group;
     }
     async listAppDataGroups() {
       this.assertNotDisposed();
-      const dir = `${APP_DATA_GROUPS_DIR}/${this.appId}`;
-      try {
-        const entries2 = await this.cachedFS.readdir(dir);
-        const descriptors = [];
+      const byId = /* @__PURE__ */ new Map();
+      for (const dir of [
+        `${APP_DATA_GROUPS_DIR}/${this.appId}`,
+        `${LEGACY_APP_DATA_GROUPS_DIR}/${this.appId}`
+      ]) {
+        let entries2;
+        try {
+          entries2 = await this.cachedFS.readdir(dir);
+        } catch {
+          continue;
+        }
         for (const entry of entries2) {
           if (!entry.endsWith(".json")) continue;
           try {
             const raw = await this.cachedFS.readFile(`${dir}/${entry}`);
             const desc = JSON.parse(new TextDecoder().decode(toUint8Array22(raw)));
-            if (desc.id && desc.groupType === "data-sync") {
-              descriptors.push(desc);
+            if (desc.id && desc.groupType === "data-sync" && !byId.has(desc.id)) {
+              byId.set(desc.id, desc);
             }
           } catch {
           }
         }
-        return descriptors;
-      } catch {
-        return [];
       }
+      return Array.from(byId.values());
     }
     async removeAppDataGroup(id) {
       this.assertNotDisposed();
@@ -28010,16 +28553,17 @@ var ZenFSConfigUI = (() => {
         await group.dispose();
         this.appDataGroups.delete(id);
       }
-      const descPath = this.appDataGroupFilePath(id);
-      try {
-        await this.deleteFile(descPath);
-      } catch (err2) {
-        log23.log(`[ConfigRepo] removeAppDataGroup: deleteFile failed for "${id}":`, err2);
+      for (const descPath of [this.appDataGroupFilePath(id), this.legacyAppDataGroupFilePath(id)]) {
         try {
-          await this.cachedFS.unlink(descPath);
-        } catch {
+          await this.deleteFile(descPath);
+        } catch (err2) {
+          log23.log(`[ConfigRepo] removeAppDataGroup: deleteFile failed for "${id}" at ${descPath}:`, err2);
+          try {
+            await this.cachedFS.unlink(descPath);
+          } catch {
+          }
+          await this.unlinkVersionSidecar(this.cachedFS, descPath);
         }
-        await this.unlinkVersionSidecar(this.cachedFS, descPath);
       }
       log23.log(`[ConfigRepo] removeAppDataGroup: "${id}" removed`);
     }
@@ -28042,26 +28586,55 @@ var ZenFSConfigUI = (() => {
     }
   };
   var AppDataGroupImpl = class {
-    constructor(groupId, appId, backends, pollIntervalMs, parent) {
+    constructor(groupId, appId, backends, pollIntervalMs, parent, descriptor = {}) {
       __publicField(this, "groupId");
       __publicField(this, "appId");
+      __publicField(this, "kind", "data");
+      __publicField(this, "features");
+      __publicField(this, "name");
       __publicField(this, "fs");
       __publicField(this, "syncEngine");
       __publicField(this, "localFS");
       __publicField(this, "dataBackends", /* @__PURE__ */ new Map());
       __publicField(this, "backendStates", /* @__PURE__ */ new Map());
       __publicField(this, "disposed", false);
+      /** `.meta/` stores shared with the config-sync group. */
+      __publicField(this, "tombstones");
+      __publicField(this, "versions");
+      __publicField(this, "conflicts");
+      __publicField(this, "postDeleteTimer");
       __publicField(this, "parent");
       __publicField(this, "_backends");
       __publicField(this, "_pollIntervalMs");
       this.groupId = groupId;
       this.appId = appId;
+      this.name = descriptor.name;
+      this.features = {
+        ...DATA_GROUP_DEFAULT_FEATURES,
+        ...descriptor.features,
+        // Tombstones are the deletion-correctness primitive: always on.
+        tombstones: true
+      };
       this.parent = parent;
       this.syncEngine = new ZenFSSync();
       this.localFS = null;
       this.fs = null;
       this._backends = backends;
       this._pollIntervalMs = pollIntervalMs;
+    }
+    /** Local "backend" id used in tombstone bookkeeping. */
+    get localBackendId() {
+      return `local:${this.groupId}`;
+    }
+    /** All backend ids that must confirm a tombstone before GC. */
+    allBackendIds() {
+      return [this.localBackendId, ...this.dataBackends.keys()];
+    }
+    tombstoneTargets() {
+      return [
+        { id: this.localBackendId, fs: this.localFS },
+        ...Array.from(this.dataBackends.entries()).map(([id, b]) => ({ id, fs: b.instance }))
+      ];
     }
     async init() {
       try {
@@ -28097,7 +28670,25 @@ var ZenFSConfigUI = (() => {
         log23.warn(`[AppDataGroup:${this.groupId}] .keep purge failed:`, err2?.message ?? err2);
       }
       const localSyncable = backendToSyncableFS(this.localFS, `local(${this.groupId})`);
-      this.fs = createChrootFS(this.localFS, "/");
+      this.tombstones = new TombstoneStore(this.localFS, this.localBackendId);
+      this.versions = new VersionStore(this.localFS, `${this.appId}/${this.groupId}`);
+      this.conflicts = new ConflictStore(this.localFS, this.appId, `${this.groupId}`, this.versions);
+      try {
+        await writeGroupDescriptor(this.localFS, {
+          schemaVersion: 1,
+          kind: "data",
+          id: this.groupId,
+          ...this.name ? { name: this.name } : {},
+          features: this.features
+        });
+      } catch (err2) {
+        log23.warn(`[AppDataGroup:${this.groupId}] failed to write .meta/group.json:`, err2);
+      }
+      this.fs = createChrootFS(this.localFS, "/", {
+        hiddenPrefixes: [META_DIR, CONFIG_DIR],
+        onWrite: (path, data) => this.recordVersion(path, data),
+        onUnlink: (path) => this.deleteFile(path)
+      });
       const { kept, removed } = dedupeAppDataBackends(this._backends);
       if (removed.length > 0) {
         log23.warn(
@@ -28116,12 +28707,29 @@ var ZenFSConfigUI = (() => {
               direction: SyncDirection.BiDirectional,
               conflictStrategy: "source-wins",
               pollIntervalMs: this._pollIntervalMs,
-              filter: { excludePrefixes: CONFIG_ONLY_PREFIXES }
+              // `.meta/` is intentionally NOT excluded: tombstones, versions and
+              // conflicts must sync, otherwise deletions resurrect on other devices.
+              filter: { excludePrefixes: CONFIG_ONLY_PREFIXES },
+              preSyncHook: async () => {
+                await this.runTombstonePass("preSync");
+              },
+              postSyncHook: async () => {
+                await this.runTombstonePass("postSync");
+                await this.confirmTombstones();
+              }
             },
             "/"
           );
           this.dataBackends.set(desc.id, { instance, syncable, pairId: pair.pairId, desc });
           this.backendStates.set(desc.id, { backendId: desc.id, pairId: pair.pairId });
+          if (this.features.conflicts) {
+            const conflictHandler = (event) => {
+              this.archiveConflict(event).catch((err2) => {
+                log23.warn(`[AppDataGroup:${this.groupId}] conflict archive failed:`, err2);
+              });
+            };
+            this.syncEngine.on(pair.pairId, "conflict", conflictHandler);
+          }
           log23.log(`[AppDataGroup:${this.groupId}] backend ${desc.id} (${desc.type}) connected, pair=${pair.pairId}`);
         } catch (err2) {
           const message = err2 instanceof Error ? err2.message : String(err2);
@@ -28150,11 +28758,123 @@ var ZenFSConfigUI = (() => {
       return this.syncEngine.getStatusAll();
     }
     async flush() {
+      await this.runTombstonePass("flush-pre");
       const results = await this.syncEngine.syncAll();
+      await this.runTombstonePass("flush-post");
+      await this.confirmTombstones();
+      try {
+        await this.tombstones.gc(this.allBackendIds(), this.tombstoneTargets());
+      } catch (err2) {
+        log23.warn(`[AppDataGroup:${this.groupId}] tombstone GC failed:`, err2);
+      }
       return Array.from(results.values());
     }
     getBackendSyncStates() {
       return new Map(this.backendStates);
+    }
+    // -----------------------------------------------------------------------
+    // Unified SyncGroupHandle — deletion & metadata (data groups)
+    // -----------------------------------------------------------------------
+    /** Record a version entry when `features.versions` is on. */
+    async recordVersion(path, data) {
+      if (!this.features.versions) return;
+      try {
+        const bytes = typeof data === "string" ? new TextEncoder().encode(data) : toUint8Array22(data);
+        await this.versions.record(path, bytes);
+      } catch (err2) {
+        log23.warn(`[AppDataGroup:${this.groupId}] version record failed for ${path}:`, err2);
+      }
+    }
+    /** Delete tombstoned files on local + every connected backend before/after sync. */
+    async runTombstonePass(stage) {
+      try {
+        await this.tombstones.process(this.tombstoneTargets());
+      } catch (err2) {
+        log23.warn(`[AppDataGroup:${this.groupId}] ${stage} tombstone pass failed:`, err2);
+      }
+    }
+    async confirmTombstones() {
+      try {
+        await this.tombstones.confirm(this.allBackendIds());
+      } catch (err2) {
+        log23.warn(`[AppDataGroup:${this.groupId}] tombstone confirmations failed:`, err2);
+      }
+    }
+    /**
+     * Delete a data file with a tombstone in `.meta/tombstones/`.
+     * The tombstone is synced (`.meta/` is no longer excluded), so the deletion
+     * survives restarts and reaches other devices instead of being resurrected.
+     */
+    async deleteFile(path) {
+      if (this.disposed) throw new Error("DataSyncGroup has been disposed");
+      const normalized = path.startsWith("/") ? path : `/${path}`;
+      if (normalized.startsWith(`${META_DIR}/`) || normalized.startsWith(`${CONFIG_DIR}/`)) {
+        throw new Error(`Cannot delete metadata path "${normalized}"`);
+      }
+      const tombstone = {
+        path: normalized,
+        deletedAt: Date.now(),
+        deletedBy: this.localBackendId,
+        confirmedBy: [this.localBackendId]
+      };
+      await this.tombstones.write(tombstone);
+      try {
+        await this.localFS.unlink(normalized);
+      } catch {
+      }
+      const versionPath = this.versions.pathFor(normalized);
+      if (versionPath) {
+        try {
+          await this.localFS.unlink(versionPath);
+        } catch {
+        }
+      }
+      this.schedulePostDeleteSync();
+    }
+    schedulePostDeleteSync() {
+      if (this.postDeleteTimer) return;
+      this.postDeleteTimer = setTimeout(() => {
+        this.postDeleteTimer = void 0;
+        void this.runTombstonePass("postDelete");
+      }, 300);
+    }
+    async listConflicts() {
+      return this.conflicts.list();
+    }
+    async resolveConflict(conflictId, mergedContent) {
+      const content = typeof mergedContent === "string" ? mergedContent : JSON.stringify(mergedContent, null, 2);
+      await this.conflicts.resolve(conflictId, content);
+      try {
+        await this.syncEngine.syncAll();
+      } catch (err2) {
+        log23.warn(`[AppDataGroup:${this.groupId}] sync after conflict resolve failed:`, err2);
+      }
+    }
+    readConflictBackup(conflictId, fileType) {
+      return this.conflicts.readBackup(conflictId, fileType);
+    }
+    purgeMtimeSidecars(options = {}) {
+      return purgeMtimeSidecars(this.localFS, options);
+    }
+    purgeKeepFiles(options = {}) {
+      return purgeKeepFiles(this.localFS, options);
+    }
+    async rename(name) {
+      await this.parent.updateAppDataGroupName(this.groupId, name);
+      this.name = name.trim();
+    }
+    async archiveConflict(event) {
+      const conflict = event.conflict;
+      if (!conflict) return;
+      await this.conflicts.archive(
+        {
+          path: conflict.path,
+          sourceContent: conflict.sourceContent,
+          targetContent: conflict.targetContent,
+          ...conflict.resolvedWith ? { resolvedWith: conflict.resolvedWith } : {}
+        },
+        event.timestamp
+      );
     }
     async addBackend(id, type, options, description) {
       if (this.disposed) throw new Error("DataSyncGroup has been disposed");
@@ -28172,13 +28892,27 @@ var ZenFSConfigUI = (() => {
           direction: SyncDirection.BiDirectional,
           conflictStrategy: "source-wins",
           pollIntervalMs: this._pollIntervalMs,
-          filter: { excludePrefixes: CONFIG_ONLY_PREFIXES }
+          filter: { excludePrefixes: CONFIG_ONLY_PREFIXES },
+          preSyncHook: async () => {
+            await this.runTombstonePass("preSync");
+          },
+          postSyncHook: async () => {
+            await this.runTombstonePass("postSync");
+            await this.confirmTombstones();
+          }
         },
         "/"
       );
       const desc = { id, type, options, description, createdAt: Date.now() };
       this.dataBackends.set(id, { instance, syncable, pairId: pair.pairId, desc });
       this.backendStates.set(id, { backendId: id, pairId: pair.pairId });
+      if (this.features.conflicts) {
+        this.syncEngine.on(pair.pairId, "conflict", (event) => {
+          this.archiveConflict(event).catch((err2) => {
+            log23.warn(`[AppDataGroup:${this.groupId}] conflict archive failed:`, err2);
+          });
+        });
+      }
       this._backends = [...this._backends.filter((b) => b.id !== id), desc];
       log23.log(`[AppDataGroup:${this.groupId}] addBackend: ${id} (${type}) connected, pair=${pair.pairId}`);
       try {
@@ -28214,6 +28948,10 @@ var ZenFSConfigUI = (() => {
     async dispose() {
       if (this.disposed) return;
       this.disposed = true;
+      if (this.postDeleteTimer) {
+        clearTimeout(this.postDeleteTimer);
+        this.postDeleteTimer = void 0;
+      }
       this.syncEngine.dispose();
       for (const [_id, backend] of this.dataBackends) {
         if (backend.instance?.dispose) {
@@ -28279,14 +29017,25 @@ var ZenFSConfigUI = (() => {
     }
     try {
       const groupTypeBytes = new TextEncoder().encode("config-sync");
-      try {
-        await primaryInstance.readFile(`${META_DIR}/group-type`);
-      } catch {
-        await primaryInstance.writeFile(`${META_DIR}/group-type`, groupTypeBytes);
-        log23.log(`[createConfigRepo] group-type set to "config-sync"`);
+      for (const path of [`${CONFIG_DIR}/group-type`, `${META_DIR}/group-type`]) {
+        try {
+          await primaryInstance.readFile(path);
+        } catch {
+          await ensureParentDir2(primaryInstance, path);
+          await primaryInstance.writeFile(path, groupTypeBytes);
+          log23.log(`[createConfigRepo] group-type set to "config-sync" at ${path}`);
+        }
+      }
+      if (!await readGroupDescriptor(primaryInstance)) {
+        await writeGroupDescriptor(primaryInstance, {
+          schemaVersion: 1,
+          kind: "config",
+          id: CONFIG_GROUP_ID,
+          features: CONFIG_GROUP_FEATURES
+        });
       }
     } catch (err2) {
-      log23.warn(`[createConfigRepo] Failed to write group-type:`, err2.message);
+      log23.warn(`[createConfigRepo] Failed to write group metadata:`, err2.message);
     }
     const tempRepo = new ConfigRepo(
       appId,
@@ -28365,6 +29114,11 @@ var ZenFSConfigUI = (() => {
       options.syncPollIntervalMs,
       cacheOptions
     );
+    try {
+      const nameDescriptor = await repo.getConfigSyncGroupDescriptor();
+      if (nameDescriptor?.name) repo.name = nameDescriptor.name;
+    } catch {
+    }
     await repo.setupSync(allBackends, LOCAL_IDB_BACKEND_ID, options.syncPollIntervalMs);
     if (options.migrateVersionSidecars !== false) {
       try {
@@ -28387,21 +29141,25 @@ var ZenFSConfigUI = (() => {
     return repo;
   }
   var log32 = createLogger3("connect");
-  var META_DIR2 = "/.meta";
-  var GROUP_TYPE_FILE2 = `${META_DIR2}/group-type`;
+  var GROUP_TYPE_FILE2 = "/.config/group-type";
+  var LEGACY_GROUP_TYPE_FILE2 = "/.meta/group-type";
   async function detectGroupType(type, options) {
     log32(`detectGroupType: connecting to ${type}...`);
     const tempBackend = await createBackend({ type, options });
     try {
-      const raw = await tempBackend.readFile(GROUP_TYPE_FILE2, "utf-8");
-      const groupType = raw.trim();
-      if (groupType === "config-sync" || groupType === "data-sync") {
-        log32(`detectGroupType: detected "${groupType}"`);
-        return groupType;
+      for (const path of [GROUP_TYPE_FILE2, LEGACY_GROUP_TYPE_FILE2]) {
+        try {
+          const raw = await tempBackend.readFile(path, "utf-8");
+          const groupType = raw.trim();
+          if (groupType === "config-sync" || groupType === "data-sync") {
+            log32(`detectGroupType: detected "${groupType}" at ${path}`);
+            return groupType;
+          }
+          log32(`detectGroupType: unknown group-type value "${groupType}" at ${path}, treating as null`);
+          return null;
+        } catch {
+        }
       }
-      log32(`detectGroupType: unknown group-type value "${groupType}", treating as null`);
-      return null;
-    } catch {
       log32(`detectGroupType: no group-type file found (new backend)`);
       return null;
     } finally {
@@ -28440,6 +29198,8 @@ var ZenFSConfigUI = (() => {
       return {
         groupType: options.groupType ?? "config-sync",
         repo: repo2,
+        configGroup: repo2,
+        groups: [repo2, ...appDataGroups2],
         dataGroup: dataGroup2,
         appDataGroups: appDataGroups2
       };
@@ -28499,7 +29259,14 @@ var ZenFSConfigUI = (() => {
         await dataGroup.addBackend(backendId, type, backendOptions);
       }
     }
-    return { groupType, repo, dataGroup, appDataGroups };
+    return {
+      groupType,
+      repo,
+      configGroup: repo,
+      groups: [repo, ...appDataGroups],
+      dataGroup,
+      appDataGroups
+    };
   }
 
   // src/core/config-string.ts
@@ -28851,11 +29618,18 @@ var ZenFSConfigUI = (() => {
 }
 .zfui-error-actions { margin-top: 8px; }
 
-.zfui-data-group {
+.zfui-group-list { display: flex; flex-direction: column; gap: 10px; margin-bottom: 12px; }
+.zfui-group-card {
   border: 1px solid #e5e7eb; border-radius: 6px; padding: 12px;
-  margin-bottom: 10px; background: #f9fafb;
+  background: #f9fafb;
 }
-.zfui-data-group-name { font-weight: 600; font-size: 13px; }
+.zfui-group-card-config { border-left: 3px solid #2563eb; }
+.zfui-group-card-data { border-left: 3px solid #15803d; }
+.zfui-group-card-name { font-weight: 600; font-size: 13px; }
+.zfui-group-kind-config { background: #dbeafe; color: #1d4ed8; }
+.zfui-group-kind-data { background: #dcfce7; color: #15803d; }
+.zfui-group-kind-hint { font-size: 11px; color: #6b7280; margin-bottom: 4px; }
+.zfui-group-card-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
 .zfui-title-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .zfui-group-name-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
 .zfui-group-id { font-size: 11px; color: #6b7280; }
@@ -29215,6 +29989,16 @@ var ZenFSConfigUI = (() => {
     ].join(" \xB7 ");
     return { text, error: lastError };
   }
+  function collectFailedBackends(states) {
+    if (!states) return [];
+    const failed = [];
+    for (const state of states.values()) {
+      if (state.error) {
+        failed.push({ id: state.backendId, message: state.error.message });
+      }
+    }
+    return failed;
+  }
   function formatBackendFailureSummary(failed) {
     return failed.length === 0 ? "" : ` \xB7 ${failed.length} \u4E2A\u540E\u7AEF\u672A\u5EFA\u7ACB\u540C\u6B65\u5BF9`;
   }
@@ -29266,7 +30050,7 @@ var ZenFSConfigUI = (() => {
     }
     // ── Version logging ──────────────────────────────────────────────────
     logVersion() {
-      const uiVersion = true ? "0.3.21" : "dev";
+      const uiVersion = true ? "0.3.22" : "dev";
       console.log(
         `%c[zen-fs-config-ui] v${uiVersion}%c (appId=${this.props.appId})`,
         "color:#2563eb;font-weight:bold",
@@ -29935,21 +30719,9 @@ var ZenFSConfigUI = (() => {
         return;
       }
       const header = el("div", { className: "zfui-header" });
-      const titleText = this.mode === "config-sync" ? this.configGroupName ? `\u914D\u7F6E\u540C\u6B65\u7EC4 \xB7 ${this.configGroupName}` : "\u914D\u7F6E\u540C\u6B65\u7EC4" : this.mode === "data-sync" ? "\u6570\u636E\u540C\u6B65\u7EC4" : "\u540C\u6B65\u7EC4";
+      const titleText = this.mode === "config-sync" ? "\u540C\u6B65\u7EC4" : this.mode === "data-sync" ? "\u6570\u636E\u540C\u6B65\u7EC4" : "\u540C\u6B65\u7EC4";
       const titleRow = el("div", { className: "zfui-title-row" });
       titleRow.appendChild(el("h1", { className: "zfui-title" }, titleText));
-      if (this.mode === "config-sync" && !this.isEditingGroupName("config")) {
-        const editBtn = el("button", {
-          className: "zfui-btn zfui-btn-secondary zfui-btn-sm zfui-group-name-btn",
-          type: "button",
-          title: "\u7F16\u8F91\u914D\u7F6E\u540C\u6B65\u7EC4\u7684\u663E\u793A\u540D\u79F0\uFF08\u53EA\u6539\u63CF\u8FF0\u7B26\uFF0C\u4E0D\u5F71\u54CD\u540E\u7AEF\u4E0E\u540C\u6B65\uFF09"
-        }, "\u7F16\u8F91");
-        on(editBtn, "click", () => this.startGroupNameEdit("config", this.configGroupName ?? ""));
-        titleRow.appendChild(editBtn);
-      }
-      if (this.mode === "config-sync" && this.isEditingGroupName("config")) {
-        titleRow.appendChild(this.buildGroupNameEditor("config", this.configGroupName ?? "", "\u914D\u7F6E\u540C\u6B65\u7EC4\u540D\u79F0"));
-      }
       header.appendChild(el("div", {}, [
         titleRow,
         el("div", { className: "zfui-subtitle" }, this.getSubtitle())
@@ -30003,177 +30775,233 @@ var ZenFSConfigUI = (() => {
       section.appendChild(addBtn);
       return section;
     }
+    /** Unified group list: the config group plus every data group, one card each. */
     buildConfigSyncView() {
-      const frag = document.createDocumentFragment();
-      const syncSection = el("div", { className: "zfui-section" });
-      syncSection.appendChild(el("div", { className: "zfui-section-title" }, "\u{1F527} \u540C\u6B65\u540E\u7AEF"));
-      syncSection.appendChild(this.buildStatusRow(
-        () => this.repo ? { statuses: this.repo.getSyncStatuses(), failed: [] } : null
-      ));
-      const list2 = el("ul", { className: "zfui-backend-list" });
-      list2.appendChild(this.buildLocalBackendItem());
-      for (const b of this.configBackends) {
-        list2.appendChild(this.buildBackendItem(
-          b.id,
-          b.type,
-          b.options ?? {},
-          b.description,
-          true,
-          void 0,
-          void 0,
-          () => this.openBackendParamEditor("config", null, b)
-        ));
-      }
-      syncSection.appendChild(list2);
-      const addBtn = el("button", { className: "zfui-btn zfui-btn-primary" }, "+ \u6DFB\u52A0\u540E\u7AEF");
-      on(addBtn, "click", () => {
-        void this.handleAddBackend();
-      });
-      syncSection.appendChild(addBtn);
-      frag.appendChild(syncSection);
-      if (this.legacyAppData) {
-        const legacySection = el("div", {
-          className: "zfui-section",
-          style: "border:1px solid #f59e0b;background:#fffbeb;padding:12px;"
-        });
-        legacySection.appendChild(el("div", { className: "zfui-section-title" }, "\u26A0\uFE0F \u68C0\u6D4B\u5230\u65E7\u7248\u9057\u7559\u6570\u636E\u7EC4"));
-        legacySection.appendChild(el("div", {
-          style: "font-size:12px;color:#92400e;line-height:1.6;margin-bottom:8px"
-        }, "\u65E7\u7248 dir-struct-gen \u81EA\u52A8\u521B\u5EFA\u7684 app-data \u7EC4\uFF08\u540E\u7AEF rs-app\uFF09\u4ECD\u4FDD\u5B58\u5728\u914D\u7F6E\u91CC\u3002\u53EF\u5C06\u5176\u540E\u7AEF\u8FC1\u79FB\u5230 default \u7EC4\u540E\u5220\u9664\u8BE5\u7EC4\uFF1B\u53EA\u5220\u9664\u672C\u5730\u63CF\u8FF0\u7B26\uFF0C\u4E0D\u4F1A\u5220\u9664\u8FDC\u7AEF app_data/folders \u4E2D\u7684\u6587\u4EF6\uFF0C\u4E0A\u4F20\u4ECD\u53EF\u7EE7\u7EED\u3002"));
-        const migrateBtn = el("button", { className: "zfui-btn zfui-btn-danger" }, "\u8FC1\u79FB\u5E76\u6E05\u7406");
-        let confirming = false;
-        on(migrateBtn, "click", () => {
-          if (confirming) {
-            confirming = false;
-            migrateBtn.textContent = "\u8FC1\u79FB\u5E76\u6E05\u7406";
-            void this.handleMigrateLegacyAppData();
-          } else {
-            confirming = true;
-            migrateBtn.textContent = "\u786E\u5B9A\u8FC1\u79FB?";
-            window.setTimeout(() => {
-              confirming = false;
-              migrateBtn.textContent = "\u8FC1\u79FB\u5E76\u6E05\u7406";
-            }, 3e3);
-          }
-        });
-        legacySection.appendChild(migrateBtn);
-        frag.appendChild(legacySection);
-      }
-      const dgSection = el("div", { className: "zfui-section" });
-      dgSection.appendChild(el("div", { className: "zfui-section-title" }, "\u{1F4E6} \u6570\u636E\u540C\u6B65\u7EC4"));
-      if (this.dataGroups.length === 0) {
-        dgSection.appendChild(el("div", { className: "zfui-empty" }, "\u6682\u65E0\u6570\u636E\u540C\u6B65\u7EC4"));
-      } else {
-        for (const dg of this.dataGroups) {
-          const card = el("div", { className: "zfui-data-group" });
-          const nameRow = el("div", { className: "zfui-group-name-row" });
-          if (this.isEditingGroupName(dg.id)) {
-            nameRow.appendChild(el("div", { className: "zfui-data-group-name" }, dg.name || dg.id));
-            nameRow.appendChild(this.buildGroupNameEditor(dg.id, dg.name ?? "", "\u6570\u636E\u540C\u6B65\u7EC4\u540D\u79F0"));
-          } else {
-            nameRow.appendChild(el("div", { className: "zfui-data-group-name" }, dg.name || dg.id));
-            if (dg.name) {
-              nameRow.appendChild(el("span", { className: "zfui-group-id" }, `id: ${dg.id}`));
-            }
-            const editNameBtn = el("button", {
-              className: "zfui-btn zfui-btn-secondary zfui-btn-sm zfui-group-name-btn",
-              type: "button",
-              title: "\u7F16\u8F91\u8BE5\u7EC4\u7684\u663E\u793A\u540D\u79F0\uFF08\u53EA\u6539\u63CF\u8FF0\u7B26\uFF0C\u4E0D\u5F71\u54CD\u540E\u7AEF\u4E0E\u540C\u6B65\uFF09"
-            }, "\u7F16\u8F91");
-            on(editNameBtn, "click", () => this.startGroupNameEdit(dg.id, dg.name ?? ""));
-            nameRow.appendChild(editNameBtn);
-          }
-          card.appendChild(nameRow);
-          const liveAtRender = this.groupInstances.get(dg.id);
-          const backendStates = liveAtRender?.getBackendSyncStates() ?? /* @__PURE__ */ new Map();
-          card.appendChild(this.buildStatusRow(
-            () => {
-              const live = this.groupInstances.get(dg.id);
-              if (!live) return null;
-              const failed = [...live.getBackendSyncStates().values()].filter((s) => s.error).map((s) => ({ id: s.backendId, message: s.error.message }));
-              return { statuses: live.getSyncStatuses(), failed };
-            },
-            this.groupInstances.has(dg.id) ? void 0 : this.groupUnavailable.get(dg.id)
-          ));
-          const dgList = el("ul", { className: "zfui-backend-list" });
-          if (dg.backends.length === 0) {
-            dgList.appendChild(el("li", { className: "zfui-backend-item", style: "color:#9ca3af;font-size:12px" }, "\uFF08\u65E0\u540E\u7AEF\uFF09"));
-          } else {
-            for (const b of dg.backends) {
-              dgList.appendChild(this.buildBackendItem(
-                b.id,
-                b.type,
-                b.options ?? {},
-                b.description,
-                true,
-                () => void this.handleRemoveDataGroupBackend(dg.id, b.id),
-                backendStates.get(b.id)?.error,
-                () => this.openBackendParamEditor("data", dg.id, b)
-              ));
-            }
-          }
-          card.appendChild(dgList);
-          const addDgBackendBtn = el("button", { className: "zfui-btn zfui-btn-primary" }, "+ \u6DFB\u52A0\u540E\u7AEF");
-          on(addDgBackendBtn, "click", () => {
+      const section = el("div", { className: "zfui-section" });
+      section.appendChild(el("div", { className: "zfui-section-title" }, "\u{1F517} \u540C\u6B65\u7EC4"));
+      const list2 = el("div", { className: "zfui-group-list" });
+      list2.appendChild(this.buildGroupCard({
+        kind: "config",
+        id: "config",
+        name: this.configGroupName,
+        backends: this.configBackends,
+        showLocalPrimary: true,
+        // The config group's own status covers its replica pairs
+        // (local primary ↔ each config backend).
+        read: () => {
+          if (!this.repo) return null;
+          return {
+            statuses: this.repo.getSyncStatuses(),
+            failed: collectFailedBackends(this.readConfigBackendStates())
+          };
+        },
+        readStates: () => this.readConfigBackendStates(),
+        onAddBackend: () => {
+          void this.handleAddBackend();
+        },
+        onRemoveBackend: (id) => {
+          void this.handleRemoveBackend(id);
+        },
+        onEditBackend: (b) => this.openBackendParamEditor("config", null, b),
+        configExtras: () => this.buildLegacyAppDataNotice()
+      }));
+      for (const dg of this.dataGroups) {
+        const live = () => this.groupInstances.get(dg.id);
+        list2.appendChild(this.buildGroupCard({
+          kind: "data",
+          id: dg.id,
+          name: dg.name ?? null,
+          backends: dg.backends,
+          // Each data-group card reads its OWN live instance's status, so two
+          // groups never share numbers (their sync engines are separate).
+          read: () => {
+            const group = live();
+            if (!group) return null;
+            return {
+              statuses: group.getSyncStatuses(),
+              failed: collectFailedBackends(group.getBackendSyncStates())
+            };
+          },
+          readStates: () => live()?.getBackendSyncStates(),
+          unavailable: live() ? void 0 : this.groupUnavailable.get(dg.id),
+          onAddBackend: () => {
             this.formTargetDataGroup = dg.id;
             void this.handleAddDataGroupBackend();
-          });
-          card.appendChild(addDgBackendBtn);
-          const removeGroupBtn = el("button", { className: "zfui-btn zfui-btn-danger" }, "\u{1F5D1} \u5220\u9664\u7EC4");
-          let confirmingGroup = false;
-          on(removeGroupBtn, "click", () => {
-            if (confirmingGroup) {
-              confirmingGroup = false;
-              removeGroupBtn.textContent = "\u{1F5D1} \u5220\u9664\u7EC4";
-              void this.handleRemoveDataGroup(dg.id);
-            } else {
-              confirmingGroup = true;
-              removeGroupBtn.textContent = "\u786E\u5B9A?";
-              window.setTimeout(() => {
-                confirmingGroup = false;
-                removeGroupBtn.textContent = "\u{1F5D1} \u5220\u9664\u7EC4";
-              }, 3e3);
-            }
-          });
-          card.appendChild(removeGroupBtn);
-          dgSection.appendChild(card);
-        }
+          },
+          onRemoveBackend: (id) => {
+            void this.handleRemoveDataGroupBackend(dg.id, id);
+          },
+          onEditBackend: (b) => this.openBackendParamEditor("data", dg.id, b),
+          onRemoveGroup: () => {
+            void this.handleRemoveDataGroup(dg.id);
+          }
+        }));
       }
+      if (this.dataGroups.length === 0) {
+        list2.appendChild(el("div", { className: "zfui-empty" }, "\u6682\u65E0\u6570\u636E\u540C\u6B65\u7EC4"));
+      }
+      section.appendChild(list2);
       const addDgBtn = el("button", { className: "zfui-btn zfui-btn-primary" }, "+ \u65B0\u589E\u6570\u636E\u540C\u6B65\u7EC4");
       on(addDgBtn, "click", () => {
         void this.handleAddDataGroup();
       });
-      dgSection.appendChild(addDgBtn);
-      frag.appendChild(dgSection);
-      return frag;
+      section.appendChild(addDgBtn);
+      return section;
     }
+    /** Standalone data-sync group rendered through the same card component. */
     buildDataSyncView() {
       const section = el("div", { className: "zfui-section" });
-      section.appendChild(el("div", { className: "zfui-section-title" }, "\u{1F517} \u540C\u6B65\u540E\u7AEF"));
-      section.appendChild(this.buildStatusRow(
-        () => this.dataGroup ? { statuses: this.dataGroup.getSyncStatuses(), failed: [] } : null
-      ));
-      const list2 = el("ul", { className: "zfui-backend-list" });
-      list2.appendChild(this.buildLocalBackendItem());
-      for (const b of this.dataBackends) {
-        list2.appendChild(this.buildBackendItem(
-          b.id,
-          b.type,
-          b.options ?? {},
-          b.description,
-          true,
-          void 0,
-          void 0,
-          () => this.openBackendParamEditor("data", this.dataGroup?.groupId ?? "default", b)
-        ));
-      }
+      section.appendChild(el("div", { className: "zfui-section-title" }, "\u{1F517} \u6570\u636E\u540C\u6B65\u7EC4"));
+      const group = this.dataGroup;
+      const list2 = el("div", { className: "zfui-group-list" });
+      list2.appendChild(this.buildGroupCard({
+        kind: "data",
+        id: group?.groupId ?? "default",
+        name: null,
+        backends: this.dataBackends,
+        // Standalone data-sync mode keeps its read-only local primary row.
+        showLocalPrimary: true,
+        read: () => group ? {
+          statuses: group.getSyncStatuses(),
+          failed: collectFailedBackends(group.getBackendSyncStates())
+        } : null,
+        readStates: () => group?.getBackendSyncStates(),
+        onAddBackend: () => {
+          void this.handleAddBackend();
+        },
+        onRemoveBackend: (id) => {
+          void this.handleRemoveBackend(id);
+        },
+        onEditBackend: (b) => this.openBackendParamEditor("data", group?.groupId ?? "default", b)
+      }));
       section.appendChild(list2);
-      const addBtn = el("button", { className: "zfui-btn zfui-btn-primary" }, "+ \u6DFB\u52A0\u540E\u7AEF");
-      on(addBtn, "click", () => {
-        void this.handleAddBackend();
-      });
-      section.appendChild(addBtn);
       return section;
+    }
+    /** Read the config repo's per-backend state when the core provides it. */
+    readConfigBackendStates() {
+      return this.repo?.getBackendSyncStates?.();
+    }
+    /**
+     * One card for any sync group. Shared parts — kind badge, display name +
+     * inline rename, unified status line, backend rows with failure labels,
+     * add/remove actions — are always rendered; `kind` only adds the
+     * config-specific block and the data-group delete action.
+     */
+    buildGroupCard(spec) {
+      const isConfig = spec.kind === "config";
+      const card = el("div", { className: `zfui-group-card zfui-group-card-${spec.kind}` });
+      const nameRow = el("div", { className: "zfui-group-name-row" });
+      nameRow.appendChild(el("span", {
+        className: `zfui-badge zfui-group-kind zfui-group-kind-${spec.kind}`
+      }, isConfig ? "\u2699 \u914D\u7F6E\u7EC4" : "\u{1F4E6} \u6570\u636E\u7EC4"));
+      const fallbackName = isConfig ? "\u914D\u7F6E\u540C\u6B65\u7EC4" : spec.id;
+      if (this.isEditingGroupName(spec.id)) {
+        nameRow.appendChild(el("div", { className: "zfui-group-card-name" }, spec.name || fallbackName));
+        nameRow.appendChild(this.buildGroupNameEditor(
+          spec.id,
+          spec.name ?? "",
+          isConfig ? "\u914D\u7F6E\u540C\u6B65\u7EC4\u540D\u79F0" : "\u6570\u636E\u540C\u6B65\u7EC4\u540D\u79F0"
+        ));
+      } else {
+        nameRow.appendChild(el("div", { className: "zfui-group-card-name" }, spec.name || fallbackName));
+        if (spec.name) nameRow.appendChild(el("span", { className: "zfui-group-id" }, `id: ${spec.id}`));
+        const editNameBtn = el("button", {
+          className: "zfui-btn zfui-btn-secondary zfui-btn-sm zfui-group-name-btn",
+          type: "button",
+          title: "\u7F16\u8F91\u8BE5\u7EC4\u7684\u663E\u793A\u540D\u79F0\uFF08\u53EA\u6539\u63CF\u8FF0\u7B26\uFF0C\u4E0D\u5F71\u54CD\u540E\u7AEF\u4E0E\u540C\u6B65\uFF09"
+        }, "\u7F16\u8F91");
+        on(editNameBtn, "click", () => this.startGroupNameEdit(spec.id, spec.name ?? ""));
+        nameRow.appendChild(editNameBtn);
+      }
+      card.appendChild(nameRow);
+      card.appendChild(el(
+        "div",
+        { className: "zfui-group-kind-hint" },
+        isConfig ? "\u627F\u8F7D\u914D\u7F6E\u4E0E\u5143\u6570\u636E\uFF1Anodes / shared / .config / .meta" : "\u627F\u8F7D\u672C\u7EC4\u5E94\u7528\u6570\u636E\uFF1B.meta \u4EC5\u4FDD\u5B58\u5893\u7891\u3001\u7248\u672C\u4E0E\u51B2\u7A81"
+      ));
+      card.appendChild(this.buildStatusRow(spec.read, spec.unavailable));
+      const states = spec.readStates?.();
+      const list2 = el("ul", { className: "zfui-backend-list" });
+      if (spec.showLocalPrimary) list2.appendChild(this.buildLocalBackendItem());
+      if (spec.backends.length === 0) {
+        list2.appendChild(el("li", {
+          className: "zfui-backend-item",
+          style: "color:#9ca3af;font-size:12px"
+        }, "\uFF08\u65E0\u540E\u7AEF\uFF09"));
+      } else {
+        for (const b of spec.backends) {
+          list2.appendChild(this.buildBackendItem(
+            b.id,
+            b.type,
+            b.options ?? {},
+            b.description,
+            true,
+            spec.onRemoveBackend ? () => spec.onRemoveBackend(b.id) : void 0,
+            states?.get(b.id)?.error,
+            spec.onEditBackend ? () => spec.onEditBackend(b) : void 0
+          ));
+        }
+      }
+      card.appendChild(list2);
+      if (isConfig && spec.configExtras) {
+        const extra = spec.configExtras();
+        if (extra) card.appendChild(extra);
+      }
+      const actions = el("div", { className: "zfui-group-card-actions" });
+      const addBtn = el("button", { className: "zfui-btn zfui-btn-primary" }, "+ \u6DFB\u52A0\u540E\u7AEF");
+      on(addBtn, "click", () => spec.onAddBackend());
+      actions.appendChild(addBtn);
+      if (spec.onRemoveGroup) {
+        const removeGroupBtn = el("button", { className: "zfui-btn zfui-btn-danger" }, "\u{1F5D1} \u5220\u9664\u7EC4");
+        let confirmingGroup = false;
+        on(removeGroupBtn, "click", () => {
+          if (confirmingGroup) {
+            confirmingGroup = false;
+            removeGroupBtn.textContent = "\u{1F5D1} \u5220\u9664\u7EC4";
+            spec.onRemoveGroup();
+          } else {
+            confirmingGroup = true;
+            removeGroupBtn.textContent = "\u786E\u5B9A?";
+            window.setTimeout(() => {
+              confirmingGroup = false;
+              removeGroupBtn.textContent = "\u{1F5D1} \u5220\u9664\u7EC4";
+            }, 3e3);
+          }
+        });
+        actions.appendChild(removeGroupBtn);
+      }
+      card.appendChild(actions);
+      return card;
+    }
+    /** Legacy `app-data` notice — a config-group-only block. */
+    buildLegacyAppDataNotice() {
+      if (!this.legacyAppData) return null;
+      const notice2 = el("div", {
+        className: "zfui-group-notice",
+        style: "border:1px solid #f59e0b;background:#fffbeb;padding:12px;border-radius:6px;margin-bottom:8px;"
+      });
+      notice2.appendChild(el("div", { className: "zfui-section-title" }, "\u26A0\uFE0F \u68C0\u6D4B\u5230\u65E7\u7248\u9057\u7559\u6570\u636E\u7EC4"));
+      notice2.appendChild(el("div", {
+        style: "font-size:12px;color:#92400e;line-height:1.6;margin-bottom:8px"
+      }, "\u65E7\u7248 dir-struct-gen \u81EA\u52A8\u521B\u5EFA\u7684 app-data \u7EC4\uFF08\u540E\u7AEF rs-app\uFF09\u4ECD\u4FDD\u5B58\u5728\u914D\u7F6E\u91CC\u3002\u53EF\u5C06\u5176\u540E\u7AEF\u8FC1\u79FB\u5230 default \u7EC4\u540E\u5220\u9664\u8BE5\u7EC4\uFF1B\u53EA\u5220\u9664\u672C\u5730\u63CF\u8FF0\u7B26\uFF0C\u4E0D\u4F1A\u5220\u9664\u8FDC\u7AEF app_data/folders \u4E2D\u7684\u6587\u4EF6\uFF0C\u4E0A\u4F20\u4ECD\u53EF\u7EE7\u7EED\u3002"));
+      const migrateBtn = el("button", { className: "zfui-btn zfui-btn-danger" }, "\u8FC1\u79FB\u5E76\u6E05\u7406");
+      let confirming = false;
+      on(migrateBtn, "click", () => {
+        if (confirming) {
+          confirming = false;
+          migrateBtn.textContent = "\u8FC1\u79FB\u5E76\u6E05\u7406";
+          void this.handleMigrateLegacyAppData();
+        } else {
+          confirming = true;
+          migrateBtn.textContent = "\u786E\u5B9A\u8FC1\u79FB?";
+          window.setTimeout(() => {
+            confirming = false;
+            migrateBtn.textContent = "\u8FC1\u79FB\u5E76\u6E05\u7406";
+          }, 3e3);
+        }
+      });
+      notice2.appendChild(migrateBtn);
+      return notice2;
     }
     // ── Per-group sync status ────────────────────────────────────────────
     /**
