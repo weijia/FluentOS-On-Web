@@ -27835,6 +27835,7 @@ var ZenFSConfigUI = (() => {
       __publicField(this, "syncEngine");
       __publicField(this, "localFS");
       __publicField(this, "dataBackends", /* @__PURE__ */ new Map());
+      __publicField(this, "backendStates", /* @__PURE__ */ new Map());
       __publicField(this, "disposed", false);
       __publicField(this, "parent");
       __publicField(this, "_backends");
@@ -27906,8 +27907,14 @@ var ZenFSConfigUI = (() => {
             "/"
           );
           this.dataBackends.set(desc.id, { instance, syncable, pairId: pair.pairId, desc });
+          this.backendStates.set(desc.id, { backendId: desc.id, pairId: pair.pairId });
           log23.log(`[AppDataGroup:${this.groupId}] backend ${desc.id} (${desc.type}) connected, pair=${pair.pairId}`);
         } catch (err2) {
+          const message = err2 instanceof Error ? err2.message : String(err2);
+          this.backendStates.set(desc.id, {
+            backendId: desc.id,
+            error: { message, timestamp: Date.now() }
+          });
           log23.error(`[AppDataGroup:${this.groupId}] Failed to create backend ${desc.id} (${desc.type}):`, err2);
         }
       }
@@ -27932,6 +27939,9 @@ var ZenFSConfigUI = (() => {
       const results = await this.syncEngine.syncAll();
       return Array.from(results.values());
     }
+    getBackendSyncStates() {
+      return new Map(this.backendStates);
+    }
     async addBackend(id, type, options, description) {
       if (this.disposed) throw new Error("DataSyncGroup has been disposed");
       if (this.dataBackends.has(id)) {
@@ -27954,6 +27964,8 @@ var ZenFSConfigUI = (() => {
       );
       const desc = { id, type, options, description, createdAt: Date.now() };
       this.dataBackends.set(id, { instance, syncable, pairId: pair.pairId, desc });
+      this.backendStates.set(id, { backendId: id, pairId: pair.pairId });
+      this._backends = [...this._backends.filter((b) => b.id !== id), desc];
       log23.log(`[AppDataGroup:${this.groupId}] addBackend: ${id} (${type}) connected, pair=${pair.pairId}`);
       try {
         await this.syncEngine.sync(pair.pairId);
@@ -27961,18 +27973,23 @@ var ZenFSConfigUI = (() => {
         log23.warn(`[AppDataGroup:${this.groupId}] addBackend: initial sync failed for ${id}:`, err2);
       }
       this.syncEngine.watch(pair.pairId);
-      await this.parent.updateAppDataGroupDescriptor(this.groupId, this.listBackends());
+      await this.parent.updateAppDataGroupDescriptor(this.groupId, this._backends);
     }
     async removeBackend(id) {
       if (this.disposed) throw new Error("DataSyncGroup has been disposed");
       const backend = this.dataBackends.get(id);
-      if (!backend) {
+      const desc = this._backends.find((b) => b.id === id);
+      if (!backend && !desc) {
         throw new Error(`Backend "${id}" not found in data group "${this.groupId}"`);
       }
-      this.syncEngine.removePair(backend.pairId);
-      this.dataBackends.delete(id);
-      await this.parent.updateAppDataGroupDescriptor(this.groupId, this.listBackends());
-      if (backend.instance?.dispose) {
+      if (backend) {
+        this.syncEngine.removePair(backend.pairId);
+        this.dataBackends.delete(id);
+      }
+      this.backendStates.delete(id);
+      this._backends = this._backends.filter((b) => b.id !== id);
+      await this.parent.updateAppDataGroupDescriptor(this.groupId, this._backends);
+      if (backend?.instance?.dispose) {
         await backend.instance.dispose();
       }
       log23.log(`[AppDataGroup:${this.groupId}] removeBackend: ${id} removed`);
@@ -28502,13 +28519,16 @@ var ZenFSConfigUI = (() => {
   margin-bottom: 8px; background: #fafafa;
 }
 .zfui-backend-item-primary { border-left: 3px solid #10b981; }
+.zfui-backend-item-error { border-left: 3px solid #ef4444; background: #fef2f2; }
 .zfui-backend-name { font-weight: 500; font-family: monospace; font-size: 13px; }
 .zfui-backend-type { font-size: 12px; color: #6b7280; margin-left: 8px; }
+.zfui-backend-error-detail { font-size: 11px; color: #b91c1c; margin-top: 2px; word-break: break-all; }
 .zfui-badge {
   display: inline-block; padding: 1px 8px; border-radius: 10px;
   font-size: 11px; font-weight: 500;
 }
 .zfui-badge-primary { background: #d1fae5; color: #065f46; }
+.zfui-badge-error { background: #fee2e2; color: #991b1b; margin-left: 8px; }
 
 .zfui-empty {
   text-align: center; color: #9ca3af; font-size: 13px;
@@ -28586,7 +28606,7 @@ var ZenFSConfigUI = (() => {
   color: #374151; flex-shrink: 0;
 }
 .zfui-status-refresh:hover { background: #e5e7eb; }
-.zfui-status-detail { font-size: 11px; color: #6b7280; line-height: 1.7; }
+.zfui-status-detail { font-size: 11px; color: #6b7280; line-height: 1.7; white-space: pre-line; }
 `;
 
   // src/core/views/backend-form.ts
@@ -28866,6 +28886,12 @@ var ZenFSConfigUI = (() => {
     ].join(" \xB7 ");
     return { text, error: lastError };
   }
+  function formatBackendFailureSummary(failed) {
+    return failed.length === 0 ? "" : ` \xB7 ${failed.length} \u4E2A\u540E\u7AEF\u672A\u5EFA\u7ACB\u540C\u6B65\u5BF9`;
+  }
+  function formatBackendFailureDetail(failed) {
+    return failed.map((f) => `\u672A\u5EFA\u7ACB\u540C\u6B65\u5BF9\uFF1A${f.id} \xB7 ${String(f.message).slice(0, 120)}`).join("\n");
+  }
   var SyncGroupConfiguratorCore = class {
     constructor(container, props) {
       this.destroyed = false;
@@ -28904,7 +28930,7 @@ var ZenFSConfigUI = (() => {
     }
     // ── Version logging ──────────────────────────────────────────────────
     logVersion() {
-      const uiVersion = true ? "0.3.17" : "dev";
+      const uiVersion = true ? "0.3.19" : "dev";
       console.log(
         `%c[zen-fs-config-ui] v${uiVersion}%c (appId=${this.props.appId})`,
         "color:#2563eb;font-weight:bold",
@@ -29327,7 +29353,12 @@ var ZenFSConfigUI = (() => {
           this.render();
           return;
         }
-        await removeAppDataGroupBackend(this.repo, groupId, backendId);
+        const live = this.groupInstances.get(groupId);
+        if (live) {
+          await live.removeBackend(backendId);
+        } else {
+          await removeAppDataGroupBackend(this.repo, groupId, backendId);
+        }
         console.log("[zenfs-config-ui] descriptor updated, backends now:", dg.backends.filter((b) => b.id !== backendId).map((b) => b.id));
         await this.loadDataGroups();
         this.render();
@@ -29449,7 +29480,7 @@ var ZenFSConfigUI = (() => {
       const syncSection = el("div", { className: "zfui-section" });
       syncSection.appendChild(el("div", { className: "zfui-section-title" }, "\u{1F527} \u540C\u6B65\u540E\u7AEF"));
       syncSection.appendChild(this.buildStatusRow(
-        () => this.repo ? this.repo.getSyncStatuses() : null
+        () => this.repo ? { statuses: this.repo.getSyncStatuses(), failed: [] } : null
       ));
       const list2 = el("ul", { className: "zfui-backend-list" });
       list2.appendChild(this.buildLocalBackendItem());
@@ -29499,10 +29530,14 @@ var ZenFSConfigUI = (() => {
         for (const dg of this.dataGroups) {
           const card = el("div", { className: "zfui-data-group" });
           card.appendChild(el("div", { className: "zfui-data-group-name" }, dg.id));
+          const liveAtRender = this.groupInstances.get(dg.id);
+          const backendStates = liveAtRender?.getBackendSyncStates() ?? /* @__PURE__ */ new Map();
           card.appendChild(this.buildStatusRow(
             () => {
               const live = this.groupInstances.get(dg.id);
-              return live ? live.getSyncStatuses() : null;
+              if (!live) return null;
+              const failed = [...live.getBackendSyncStates().values()].filter((s) => s.error).map((s) => ({ id: s.backendId, message: s.error.message }));
+              return { statuses: live.getSyncStatuses(), failed };
             },
             this.groupInstances.has(dg.id) ? void 0 : this.groupUnavailable.get(dg.id)
           ));
@@ -29511,7 +29546,15 @@ var ZenFSConfigUI = (() => {
             dgList.appendChild(el("li", { className: "zfui-backend-item", style: "color:#9ca3af;font-size:12px" }, "\uFF08\u65E0\u540E\u7AEF\uFF09"));
           } else {
             for (const b of dg.backends) {
-              dgList.appendChild(this.buildBackendItem(b.id, b.type, b.options ?? {}, b.description, true, () => void this.handleRemoveDataGroupBackend(dg.id, b.id)));
+              dgList.appendChild(this.buildBackendItem(
+                b.id,
+                b.type,
+                b.options ?? {},
+                b.description,
+                true,
+                () => void this.handleRemoveDataGroupBackend(dg.id, b.id),
+                backendStates.get(b.id)?.error
+              ));
             }
           }
           card.appendChild(dgList);
@@ -29553,7 +29596,7 @@ var ZenFSConfigUI = (() => {
       const section = el("div", { className: "zfui-section" });
       section.appendChild(el("div", { className: "zfui-section-title" }, "\u{1F517} \u540C\u6B65\u540E\u7AEF"));
       section.appendChild(this.buildStatusRow(
-        () => this.dataGroup ? this.dataGroup.getSyncStatuses() : null
+        () => this.dataGroup ? { statuses: this.dataGroup.getSyncStatuses(), failed: [] } : null
       ));
       const list2 = el("ul", { className: "zfui-backend-list" });
       list2.appendChild(this.buildLocalBackendItem());
@@ -29602,25 +29645,33 @@ var ZenFSConfigUI = (() => {
           ref.detailEl.textContent = "";
           continue;
         }
-        let statuses = null;
+        let snapshot = null;
         try {
-          statuses = ref.read();
+          snapshot = ref.read();
         } catch (err2) {
           ref.textEl.textContent = "\u540C\u6B65\u72B6\u6001\u8BFB\u53D6\u5931\u8D25 \xB7 " + (err2 instanceof Error ? err2.message : String(err2));
           ref.textEl.parentElement?.classList.add("err");
           ref.detailEl.textContent = "";
           continue;
         }
-        if (!statuses) {
+        if (!snapshot) {
           ref.textEl.textContent = "\u672A\u8FDE\u63A5 \xB7 \u8BE5\u7EC4\u6CA1\u6709\u5F53\u524D\u4F1A\u8BDD\u7684\u5B9E\u4F8B\uFF0C\u6682\u65E0\u5B9E\u65F6\u72B6\u6001";
           ref.textEl.parentElement?.classList.add("err");
           ref.detailEl.textContent = "";
           continue;
         }
-        ref.textEl.parentElement?.classList.remove("err");
-        const { text, error: error2 } = formatSyncStatuses(statuses);
-        ref.textEl.textContent = text;
-        ref.detailEl.textContent = error2 ? `\u6700\u540E\u9519\u8BEF ${fmtClock(error2.timestamp)} \xB7 ${String(error2.message).slice(0, 120)}` : "";
+        const { text, error: error2 } = formatSyncStatuses(snapshot.statuses);
+        const failed = snapshot.failed;
+        if (failed.length > 0) {
+          ref.textEl.parentElement?.classList.add("err");
+        } else {
+          ref.textEl.parentElement?.classList.remove("err");
+        }
+        ref.textEl.textContent = text + formatBackendFailureSummary(failed);
+        const detailParts = [];
+        if (failed.length > 0) detailParts.push(formatBackendFailureDetail(failed));
+        if (error2) detailParts.push(`\u6700\u540E\u9519\u8BEF ${fmtClock(error2.timestamp)} \xB7 ${String(error2.message).slice(0, 120)}`);
+        ref.detailEl.textContent = detailParts.join("\n");
       }
     }
     ensureStatusTimer() {
@@ -29655,16 +29706,28 @@ var ZenFSConfigUI = (() => {
       ]));
       return li;
     }
-    buildBackendItem(id, type, options, description, removable, onRemove) {
+    buildBackendItem(id, type, options, description, removable, onRemove, syncError) {
       const meta = this.metadata.find((m) => m.type === type);
       const label = meta ? `${meta.icon} ${meta.label}` : type;
-      const li = el("li", { className: "zfui-backend-item" });
+      const li = el("li", {
+        className: syncError ? "zfui-backend-item zfui-backend-item-error" : "zfui-backend-item",
+        title: syncError ? `\u672A\u5EFA\u7ACB\u540C\u6B65\u5BF9\uFF1A${syncError.message}` : void 0
+      });
       const info2 = el("div", {}, [
         el("span", { className: "zfui-backend-name" }, id),
         el("span", { className: "zfui-backend-type" }, label)
       ]);
+      if (syncError) {
+        info2.appendChild(el("span", { className: "zfui-badge zfui-badge-error" }, "\u26A0 \u672A\u5EFA\u7ACB\u540C\u6B65\u5BF9"));
+      }
       if (description) {
         info2.appendChild(el("div", { style: "font-size:11px;color:#9ca3af;margin-top:2px" }, description));
+      }
+      if (syncError) {
+        info2.appendChild(el("div", {
+          className: "zfui-backend-error-detail",
+          title: syncError.message
+        }, `\u672A\u5EFA\u7ACB\u540C\u6B65\u5BF9\uFF1A${String(syncError.message).slice(0, 160)}`));
       }
       li.appendChild(info2);
       const actions = el("div", { className: "zfui-backend-item-actions" });
