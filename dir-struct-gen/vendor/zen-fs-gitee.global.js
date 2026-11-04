@@ -18738,8 +18738,11 @@ var ZenFSGitee = (() => {
     }
     /**
      * Bootstrap an empty repository through the Contents API: creating
-     * `README.md` produces the first commit. `POST /branches` is unusable here
+     * `.keep` produces the first commit. `POST /branches` is unusable here
      * because it requires an existing `refs` start point.
+     *
+     * `.keep` is the sync layer's hidden placeholder, so an initialized
+     * repository still looks empty to readers while the branch/tree exist.
      *
      * Runs at most once per instance. On failure the error is cached so later
      * sync rounds never write again.
@@ -18748,29 +18751,38 @@ var ZenFSGitee = (() => {
       if (this.autoInitialized) return;
       if (this.autoInitError) throw this.autoInitError;
       const targetBranch = this.configuredBranch || defaultBranch || "master";
-      const content = `# ${this.repo}
-
-\u7531 zen-fs \u521D\u59CB\u5316
-`;
-      try {
-        await this.request(`/repos/${this.owner}/${this.repo}/contents/README.md?branch=${targetBranch}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            content: encodeBase64(new TextEncoder().encode(content)),
-            message: "chore: \u521D\u59CB\u5316\u4ED3\u5E93\uFF08zen-fs \u81EA\u52A8\u521B\u5EFA\uFF09"
-          })
-        });
-      } catch (err2) {
+      const message = "chore: \u521D\u59CB\u5316\u4ED3\u5E93\uFF08zen-fs \u81EA\u52A8\u521B\u5EFA\uFF09";
+      const path = `/repos/${this.owner}/${this.repo}/contents/.keep?branch=${targetBranch}`;
+      const writeKeep = (content) => this.request(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: encodeBase64(content), message })
+      });
+      const readableError = (err2) => {
         const status = _GiteeAPI.httpStatus(err2);
         const detail = err2 instanceof Error ? err2.message : String(err2);
-        const readable = status === 403 ? new Error(
+        return status === 403 ? new Error(
           `Gitee \u4ED3\u5E93 ${this.owner}/${this.repo} \u4E3A\u7A7A\uFF0C\u81EA\u52A8\u521D\u59CB\u5316\u88AB\u62D2\u7EDD\uFF1Atoken \u7F3A\u5C11\u5199\u5165\u6743\u9650\uFF08\u9700\u8981 projects \u8BFB\u5199\u6743\u9650\uFF09`
         ) : status === 404 ? new Error(
           `Gitee \u4ED3\u5E93 ${this.owner}/${this.repo} \u4E0D\u5B58\u5728\u6216\u65E0\u6743\u8BBF\u95EE\uFF0C\u65E0\u6CD5\u81EA\u52A8\u521D\u59CB\u5316`
         ) : new Error(`Gitee \u4ED3\u5E93 ${this.owner}/${this.repo} \u4E3A\u7A7A\uFF0C\u81EA\u52A8\u521D\u59CB\u5316\u5931\u8D25\uFF1A${detail}`);
-        this.autoInitError = readable;
-        throw readable;
+      };
+      try {
+        await writeKeep(new Uint8Array(0));
+      } catch (err2) {
+        const status = _GiteeAPI.httpStatus(err2);
+        if (status !== 400 && status !== 422) {
+          const readable = readableError(err2);
+          this.autoInitError = readable;
+          throw readable;
+        }
+        try {
+          await writeKeep(new TextEncoder().encode("\n"));
+        } catch (retryErr) {
+          const readable = readableError(retryErr);
+          this.autoInitError = readable;
+          throw readable;
+        }
       }
       this.autoInitialized = true;
       this.resolvedBranch = targetBranch;
