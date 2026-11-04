@@ -26373,10 +26373,25 @@ var ZenFSConfigUI = (() => {
   var BACKENDS_FILE = `${META_DIR}/backends.json`;
   var BACKENDS_DIR = `${META_DIR}/backends`;
   var APP_DATA_GROUPS_DIR = `${META_DIR}/app-data-groups`;
+  var CONFIG_SYNC_GROUP_FILE = `${META_DIR}/config-sync-group.json`;
+  var GROUP_NAME_MAX_LENGTH = 40;
   var CONFLICTS_DIR = `${META_DIR}/.conflicts`;
   var DELETIONS_DIR = `${META_DIR}/.deleted`;
   var NODES_DIR = "/nodes";
   var SHARED_DIR = "/shared";
+  function normalizeGroupName(value) {
+    if (typeof value !== "string") {
+      throw new Error("Group name must be a string");
+    }
+    const name = value.trim();
+    if (!name) {
+      throw new Error("Group name must not be empty");
+    }
+    if (name.length > GROUP_NAME_MAX_LENGTH) {
+      throw new Error(`Group name must be at most ${GROUP_NAME_MAX_LENGTH} characters`);
+    }
+    return name;
+  }
   var CONFIG_ONLY_PREFIXES = [META_DIR, NODES_DIR, SHARED_DIR];
   var LOCAL_IDB_BACKEND_ID = "local-idb";
   function tombstoneFileName(filePath) {
@@ -27562,6 +27577,14 @@ var ZenFSConfigUI = (() => {
           `Backend "${id}" has the same configuration as existing backend "${dup.id}" (type=${type}). Use removeBackend("${dup.id}") first, or connect with the existing backend's ID.`
         );
       }
+      await this.setupReplica(id, type, options, description);
+    }
+    /**
+     * Instantiate a config-sync replica, persist its descriptor, create its
+     * sync pair, register lifecycle hooks and run the initial sync/watch.
+     * Shared by addBackend() and replaceBackend().
+     */
+    async setupReplica(id, type, options, description) {
       log23.log(`[ConfigRepo] addBackend: creating ${id} (${type})...`);
       const instance = await createBackend({ type, options });
       const syncable = backendToSyncableFS(instance, `${type}(${id})`);
@@ -27601,6 +27624,7 @@ var ZenFSConfigUI = (() => {
       log23.log(`[ConfigRepo] addBackend: ${id} (${type}) added, sync pair=${pair.pairId}`);
       await this.syncMetaToReplicas();
       this.syncEngine.watch(pair.pairId);
+      return pair.pairId;
     }
     async removeBackend(id) {
       this.assertNotDisposed();
@@ -27636,6 +27660,60 @@ var ZenFSConfigUI = (() => {
       }
       this.schedulePostDeleteSync();
       log23.log(`[ConfigRepo] removeBackend: ${id} removed (tombstone written, remote cleaned)`);
+    }
+    /**
+     * Replace a config-sync backend's parameters in place (same id).
+     *
+     * Probe the new parameters first: if the backend cannot even be created
+     * (e.g. missing token), nothing is touched and the error is rethrown.
+     * Otherwise the old pair is removed, the descriptor rewritten, and a new
+     * pair created against the new target with an initial sync. If that fails,
+     * the old descriptor and pair are restored. The descriptor file is never
+     * tombstoned, so this never delete-then-recreates it.
+     */
+    async replaceBackend(id, type, options, description) {
+      this.assertNotDisposed();
+      if (id === LOCAL_IDB_BACKEND_ID) {
+        throw new Error("Cannot edit the local IndexedDB primary backend");
+      }
+      const all = await this.readAllBackendDescriptors();
+      const before = all.find((b) => b.id === id);
+      if (!before) {
+        throw new Error(`Backend "${id}" not found`);
+      }
+      const probe2 = await createBackend({ type, options });
+      try {
+        await probe2.dispose?.();
+      } catch {
+      }
+      const newKey = backendDedupKey({ id, type, options });
+      const dup = all.find((b) => b.id !== id && backendDedupKey(b) === newKey);
+      if (dup) {
+        throw new Error(
+          `\u65B0\u53C2\u6570\u4E0E\u5DF2\u6709\u540E\u7AEF\u300C${dup.id}\u300D\u6307\u5411\u540C\u4E00\u8FDC\u7AEF\uFF08\u7C7B\u578B\u4E0E\u53C2\u6570\u5B8C\u5168\u76F8\u540C\uFF09\uFF0C\u8BF7\u5148\u5220\u9664\u91CD\u590D\u540E\u7AEF\u300C${dup.id}\u300D\u6216\u6539\u7528\u4E0D\u540C\u53C2\u6570`
+        );
+      }
+      const oldReplica = this.replicaBackends.get(id);
+      if (oldReplica) {
+        this.syncEngine.removePair(oldReplica.pairId);
+        this.replicaBackends.delete(id);
+        try {
+          await oldReplica.instance?.dispose?.();
+        } catch {
+        }
+      }
+      try {
+        await this.setupReplica(id, type, options, description ?? before.description);
+      } catch (err2) {
+        const reason = err2 instanceof Error ? err2.message : String(err2);
+        log23.warn(`[ConfigRepo] replaceBackend: "${id}" failed, rolling back old options:`, err2);
+        try {
+          await this.setupReplica(id, before.type, before.options, before.description);
+        } catch (rollbackErr) {
+          log23.error(`[ConfigRepo] replaceBackend: rollback for "${id}" ALSO failed:`, rollbackErr);
+        }
+        throw new Error(`\u66F4\u65B0\u540E\u7AEF\u53C2\u6570\u5931\u8D25\uFF1A${reason}\uFF08\u5DF2\u5C1D\u8BD5\u56DE\u6EDA\u65E7\u53C2\u6570\uFF09`);
+      }
     }
     // -----------------------------------------------------------------------
     // IConfigRepo — Group Type
@@ -27732,9 +27810,11 @@ var ZenFSConfigUI = (() => {
      */
     async updateAppDataGroupDescriptor(id, backends) {
       this.assertNotDisposed();
+      const existing = await this.readAppDataGroupDescriptor(id);
       const descriptor = {
         id,
         groupType: "data-sync",
+        ...existing?.name ? { name: existing.name } : {},
         backends
       };
       const descPath = this.appDataGroupFilePath(id);
@@ -27744,6 +27824,140 @@ var ZenFSConfigUI = (() => {
       const author = `${this.appId}/${this.nodeId}`;
       const version2 = await incrementVersion(this.fullFS, descPath, bytes, author);
       await this.writeVersionSidecar(descPath, version2);
+    }
+    /**
+     * Change a data-sync group's display name only. `id`, backends, local stores
+     * and remote data are untouched, so existing sync pairs keep working.
+     */
+    async updateAppDataGroupName(id, name) {
+      this.assertNotDisposed();
+      const normalized = normalizeGroupName(name);
+      const existing = await this.readAppDataGroupDescriptor(id);
+      if (!existing) {
+        throw new Error(`App data group "${id}" not found`);
+      }
+      const descriptor = {
+        ...existing,
+        id,
+        groupType: "data-sync",
+        name: normalized
+      };
+      const descPath = this.appDataGroupFilePath(id);
+      await this.ensureDir(descPath);
+      const bytes = new TextEncoder().encode(JSON.stringify(descriptor, null, 2));
+      await this.cachedFS.writeFile(descPath, bytes);
+      const author = `${this.appId}/${this.nodeId}`;
+      const version2 = await incrementVersion(this.fullFS, descPath, bytes, author);
+      await this.writeVersionSidecar(descPath, version2);
+    }
+    /**
+     * Replace a data-sync backend's parameters in place (same backend id).
+     *
+     * Changing parameters means switching to a different remote target: the live
+     * group is disposed (old pairs torn down), the descriptor is rewritten, and a
+     * fresh group instance creates pairs + performs the initial sync. Old remote
+     * data is NOT migrated. If the new options cannot be instantiated, nothing is
+     * touched; if re-initialisation fails, the old descriptor is restored.
+     */
+    async replaceAppDataGroupBackend(groupId, backendId, type, options, description) {
+      this.assertNotDisposed();
+      const descriptor = await this.readAppDataGroupDescriptor(groupId);
+      if (!descriptor) {
+        throw new Error(`App data group "${groupId}" not found`);
+      }
+      const index = descriptor.backends.findIndex((b) => b.id === backendId);
+      if (index < 0) {
+        throw new Error(`Backend "${backendId}" not found in data group "${groupId}"`);
+      }
+      const candidate = { ...descriptor.backends[index], type, options, description: description ?? descriptor.backends[index].description };
+      const mergedOptions = await this.resolveAppDataBackendOptions(candidate);
+      const probe2 = await createBackend({ type, options: mergedOptions });
+      try {
+        await probe2.dispose?.();
+      } catch {
+      }
+      const oldBackends = descriptor.backends.map((b) => ({ ...b }));
+      const nextBackends = descriptor.backends.map(
+        (b, i) => i === index ? { ...candidate, options: mergedOptions } : b
+      );
+      const live = this.appDataGroups.get(groupId);
+      if (live) {
+        await live.dispose();
+        this.appDataGroups.delete(groupId);
+      }
+      await this.updateAppDataGroupDescriptor(groupId, nextBackends);
+      try {
+        const group = new AppDataGroupImpl(
+          groupId,
+          this.appId,
+          nextBackends,
+          this.pollIntervalMs,
+          this
+        );
+        await group.init();
+        this.appDataGroups.set(groupId, group);
+        return group;
+      } catch (err2) {
+        const reason = err2 instanceof Error ? err2.message : String(err2);
+        log23.warn(`[ConfigRepo] replaceAppDataGroupBackend: "${backendId}" failed, rolling back:`, err2);
+        try {
+          await this.updateAppDataGroupDescriptor(groupId, oldBackends);
+          const restored = new AppDataGroupImpl(
+            groupId,
+            this.appId,
+            oldBackends,
+            this.pollIntervalMs,
+            this
+          );
+          await restored.init();
+          this.appDataGroups.set(groupId, restored);
+        } catch (rollbackErr) {
+          log23.error("[ConfigRepo] replaceAppDataGroupBackend: rollback ALSO failed:", rollbackErr);
+        }
+        throw new Error(`\u66F4\u65B0\u540E\u7AEF\u53C2\u6570\u5931\u8D25\uFF1A${reason}\uFF08\u5DF2\u5C1D\u8BD5\u56DE\u6EDA\u65E7\u53C2\u6570\uFF09`);
+      }
+    }
+    async getConfigSyncGroupDescriptor() {
+      this.assertNotDisposed();
+      try {
+        const raw = await this.cachedFS.readFile(CONFIG_SYNC_GROUP_FILE);
+        const parsed = JSON.parse(new TextDecoder().decode(toUint8Array22(raw)));
+        if (parsed && parsed.groupType === "config-sync") {
+          return parsed;
+        }
+      } catch {
+      }
+      return null;
+    }
+    /**
+     * Change the config-sync group's display name only. Backends, the local
+     * store and remote data are untouched.
+     */
+    async updateConfigSyncGroupDescriptor(patch) {
+      this.assertNotDisposed();
+      const normalized = normalizeGroupName(patch?.name);
+      const descriptor = {
+        groupType: "config-sync",
+        name: normalized
+      };
+      await this.ensureDir(CONFIG_SYNC_GROUP_FILE);
+      const bytes = new TextEncoder().encode(JSON.stringify(descriptor, null, 2));
+      await this.cachedFS.writeFile(CONFIG_SYNC_GROUP_FILE, bytes);
+      const author = `${this.appId}/${this.nodeId}`;
+      const version2 = await incrementVersion(this.fullFS, CONFIG_SYNC_GROUP_FILE, bytes, author);
+      await this.writeVersionSidecar(CONFIG_SYNC_GROUP_FILE, version2);
+      return descriptor;
+    }
+    async readAppDataGroupDescriptor(id) {
+      try {
+        const raw = await this.cachedFS.readFile(this.appDataGroupFilePath(id));
+        const parsed = JSON.parse(new TextDecoder().decode(toUint8Array22(raw)));
+        if (parsed && parsed.id === id && parsed.groupType === "data-sync") {
+          return parsed;
+        }
+      } catch {
+      }
+      return null;
     }
     async getAppDataGroup(id) {
       this.assertNotDisposed();
@@ -28318,8 +28532,18 @@ var ZenFSConfigUI = (() => {
     if (!id.trim()) return null;
     const options = { ...meta.defaultOptions ?? {} };
     let description = "";
-    if (optionsStr) {
-      for (const pair of optionsStr.split(",")) {
+    const DESC_MARKER = ":desc=";
+    let optionsPart = optionsStr;
+    const descIdx = optionsPart.indexOf(DESC_MARKER);
+    if (descIdx >= 0) {
+      description = optionsPart.slice(descIdx + DESC_MARKER.length);
+      optionsPart = optionsPart.slice(0, descIdx);
+    } else if (optionsPart.startsWith("desc=")) {
+      description = optionsPart.slice("desc=".length);
+      optionsPart = "";
+    }
+    if (optionsPart) {
+      for (const pair of optionsPart.split(",")) {
         const eq = pair.indexOf("=");
         if (eq < 0) continue;
         const key = pair.slice(0, eq);
@@ -28382,6 +28606,25 @@ var ZenFSConfigUI = (() => {
     const next = dg.backends.filter((b) => b.id !== backendId);
     await repo.updateAppDataGroupDescriptor(groupId, next);
   }
+  async function getConfigGroupDescriptor(repo) {
+    try {
+      return await repo.getConfigSyncGroupDescriptor();
+    } catch {
+      return null;
+    }
+  }
+  async function updateConfigGroupName(repo, name) {
+    await repo.updateConfigSyncGroupDescriptor({ name });
+  }
+  async function updateDataGroupName(repo, groupId, name) {
+    await repo.updateAppDataGroupName(groupId, name);
+  }
+  async function replaceConfigBackend(repo, id, type, options, description) {
+    await repo.replaceBackend(id, type, options, description);
+  }
+  async function replaceDataGroupBackend(repo, groupId, backendId, type, options, description) {
+    return repo.replaceAppDataGroupBackend(groupId, backendId, type, options, description);
+  }
   function detectLegacyAppDataGroup(groups) {
     const group = groups.find((g) => g.id === "app-data");
     if (!group) return null;
@@ -28418,6 +28661,19 @@ var ZenFSConfigUI = (() => {
   }
   function listDataBackends(dataGroup) {
     return dataGroup.listBackends();
+  }
+
+  // src/core/group-name.ts
+  var GROUP_NAME_MAX_LENGTH2 = 40;
+  function validateGroupName(raw) {
+    const name = raw.trim();
+    if (!name) {
+      return { ok: false, error: "\u7EC4\u540D\u4E0D\u80FD\u4E3A\u7A7A" };
+    }
+    if (name.length > GROUP_NAME_MAX_LENGTH2) {
+      return { ok: false, error: `\u7EC4\u540D\u6700\u591A ${GROUP_NAME_MAX_LENGTH2} \u4E2A\u5B57\u7B26` };
+    }
+    return { ok: true, name };
   }
 
   // src/core/render.ts
@@ -28563,7 +28819,12 @@ var ZenFSConfigUI = (() => {
 .zfui-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px; }
 
 .zfui-form-row { display: flex; gap: 8px; align-items: center; }
-.zfui-form-error { color: #dc2626; font-size: 12px; margin-top: 4px; }
+.zfui-form-error { color: #dc2626; font-size: 12px; margin-top: 4px; padding: 8px; background: #fef2f2; border-radius: 6px; }
+.zfui-form-notice { font-size: 12px; line-height: 1.6; color: #92400e; background: #fffbeb; border: 1px solid #f59e0b; border-radius: 6px; padding: 10px 12px; margin-bottom: 12px; }
+.zfui-confirm-group { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: 10px; }
+.zfui-confirm-label { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; color: #374151; cursor: pointer; }
+.zfui-confirm-label input { margin-top: 2px; }
+.zfui-form-hint { font-size: 11px; color: #6b7280; margin-top: 4px; }
 .zfui-divider { height: 1px; background: #e5e7eb; margin: 16px 0; }
 
 .zfui-inline-form {
@@ -28594,7 +28855,14 @@ var ZenFSConfigUI = (() => {
   border: 1px solid #e5e7eb; border-radius: 6px; padding: 12px;
   margin-bottom: 10px; background: #f9fafb;
 }
-.zfui-data-group-name { font-weight: 600; font-size: 13px; margin-bottom: 8px; }
+.zfui-data-group-name { font-weight: 600; font-size: 13px; }
+.zfui-title-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.zfui-group-name-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+.zfui-group-id { font-size: 11px; color: #6b7280; }
+.zfui-group-name-btn { flex-shrink: 0; }
+.zfui-group-name-edit { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; width: 100%; }
+.zfui-group-name-input { flex: 1; min-width: 160px; }
+.zfui-group-name-error { color: #b91c1c; font-size: 12px; }
 .zfui-status-line {
   font-size: 11px; color: #4b5563; line-height: 1.7; margin: 6px 0 4px;
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
@@ -28608,6 +28876,14 @@ var ZenFSConfigUI = (() => {
 .zfui-status-refresh:hover { background: #e5e7eb; }
 .zfui-status-detail { font-size: 11px; color: #6b7280; line-height: 1.7; white-space: pre-line; }
 `;
+
+  // src/core/secret.ts
+  function maskSecret(value) {
+    const text = value == null ? "" : String(value);
+    if (!text) return "";
+    if (text.length <= 4) return "\u2022\u2022\u2022\u2022";
+    return `\u2022\u2022\u2022\u2022${text.slice(-4)}`;
+  }
 
   // src/core/views/backend-form.ts
   var globalStylesInjected = false;
@@ -28635,61 +28911,79 @@ var ZenFSConfigUI = (() => {
       clear(opts.container);
       opts.container.appendChild(root);
     }
-    const type = defaultType ?? metadataList[0]?.type ?? "";
+    const editing = opts.initial;
+    const type = editing?.type ?? defaultType ?? metadataList[0]?.type ?? "";
     const state = {
       type,
-      id: "",
-      description: "",
+      id: editing?.id ?? "",
+      description: editing?.description ?? "",
       options: {},
       accountBackendId: "",
       importStr: "",
       importError: "",
-      submitError: ""
+      submitError: "",
+      confirmChecked: false
     };
     const initialMeta = metadataList.find((m) => m.type === type);
-    if (initialMeta) {
+    if (editing) {
+      for (const [key, value] of Object.entries(editing.options ?? {})) {
+        state.options[key] = value == null ? "" : String(value);
+      }
+      for (const field2 of initialMeta?.fields ?? []) {
+        if (field2.type === "password") delete state.options[field2.key];
+      }
+    } else if (initialMeta) {
       state.options = { ...initialMeta.defaultOptions };
       state.id = `${type.toLowerCase()}-${Date.now().toString(36)}`;
     }
     function render() {
       clear(root);
       const meta = metadataList.find((m) => m.type === state.type);
-      root.appendChild(el("div", { className: "zfui-modal-title" }, title ?? "\u6DFB\u52A0\u540E\u7AEF"));
-      const importGroup = el("div", { className: "zfui-form-group" });
-      importGroup.appendChild(el("label", { className: "zfui-form-label" }, "\u4ECE\u914D\u7F6E\u5B57\u7B26\u4E32\u5BFC\u5165\uFF08\u53EF\u9009\uFF09"));
-      const importRow = el("div", { className: "zfui-form-row" });
-      const importInput = el("input", {
-        className: "zfui-form-input",
-        value: state.importStr,
-        placeholder: "type:id:key=value,key=value",
-        style: "font-family:monospace;font-size:12px;flex:1"
-      });
-      on(importInput, "input", () => {
-        state.importStr = importInput.value;
-      });
-      const importBtn = el("button", { className: "zfui-btn zfui-btn-sm" }, "\u5BFC\u5165");
-      on(importBtn, "click", () => {
-        const parsed = deserializeBackend(state.importStr, metadataList);
-        if (!parsed) {
-          state.importError = "\u683C\u5F0F\u65E0\u6548\u6216\u672A\u77E5\u7C7B\u578B\u3002\u793A\u4F8B: Gitee:my-repo:owner=weijia,repo=configs";
-          render();
-          return;
-        }
-        state.type = parsed.type;
-        state.id = parsed.id;
-        state.options = { ...parsed.options };
-        state.description = parsed.description;
-        state.importError = "";
-        render();
-      });
-      importRow.appendChild(importInput);
-      importRow.appendChild(importBtn);
-      importGroup.appendChild(importRow);
-      if (state.importError) {
-        importGroup.appendChild(el("div", { className: "zfui-form-error" }, state.importError));
+      root.appendChild(el(
+        "div",
+        { className: "zfui-modal-title" },
+        title ?? (editing ? `\u7F16\u8F91\u540E\u7AEF\u53C2\u6570 \xB7 ${state.id}` : "\u6DFB\u52A0\u540E\u7AEF")
+      ));
+      if (opts.notice) {
+        root.appendChild(el("div", { className: "zfui-form-notice" }, opts.notice));
       }
-      root.appendChild(importGroup);
-      root.appendChild(el("div", { className: "zfui-divider" }));
+      if (!editing) {
+        const importGroup = el("div", { className: "zfui-form-group" });
+        importGroup.appendChild(el("label", { className: "zfui-form-label" }, "\u4ECE\u914D\u7F6E\u5B57\u7B26\u4E32\u5BFC\u5165\uFF08\u53EF\u9009\uFF09"));
+        const importRow = el("div", { className: "zfui-form-row" });
+        const importInput = el("input", {
+          className: "zfui-form-input",
+          value: state.importStr,
+          placeholder: "type:id:key=value,key=value",
+          style: "font-family:monospace;font-size:12px;flex:1"
+        });
+        on(importInput, "input", () => {
+          state.importStr = importInput.value;
+        });
+        const importBtn = el("button", { className: "zfui-btn zfui-btn-sm" }, "\u5BFC\u5165");
+        on(importBtn, "click", () => {
+          const parsed = deserializeBackend(state.importStr, metadataList);
+          if (!parsed) {
+            state.importError = "\u683C\u5F0F\u65E0\u6548\u6216\u672A\u77E5\u7C7B\u578B\u3002\u793A\u4F8B: Gitee:my-repo:owner=weijia,repo=configs";
+            render();
+            return;
+          }
+          state.type = parsed.type;
+          state.id = parsed.id;
+          state.options = { ...parsed.options };
+          state.description = parsed.description;
+          state.importError = "";
+          render();
+        });
+        importRow.appendChild(importInput);
+        importRow.appendChild(importBtn);
+        importGroup.appendChild(importRow);
+        if (state.importError) {
+          importGroup.appendChild(el("div", { className: "zfui-form-error" }, state.importError));
+        }
+        root.appendChild(importGroup);
+        root.appendChild(el("div", { className: "zfui-divider" }));
+      }
       const typeGroup = el("div", { className: "zfui-form-group" });
       typeGroup.appendChild(el("label", { className: "zfui-form-label" }, "\u540E\u7AEF\u7C7B\u578B"));
       const typeSelect = el("select", { className: "zfui-form-select" });
@@ -28697,6 +28991,10 @@ var ZenFSConfigUI = (() => {
         const opt = el("option", { value: m.type }, `${m.icon} ${m.label}`);
         if (m.type === state.type) opt.setAttribute("selected", "");
         typeSelect.appendChild(opt);
+      }
+      if (editing) {
+        typeSelect.disabled = true;
+        typeSelect.title = "\u7F16\u8F91\u65F6\u4E0D\u80FD\u66F4\u6539\u540E\u7AEF\u7C7B\u578B";
       }
       on(typeSelect, "change", () => {
         state.type = typeSelect.value;
@@ -28719,14 +29017,18 @@ var ZenFSConfigUI = (() => {
         placeholder: "backend-id",
         style: "font-family:monospace"
       });
+      if (editing) {
+        idInput.readOnly = true;
+        idInput.title = "\u540E\u7AEF id \u4FDD\u6301\u4E0D\u53D8";
+      }
       on(idInput, "input", () => {
-        state.id = idInput.value;
+        if (!editing) state.id = idInput.value;
       });
       idGroup.appendChild(idInput);
       root.appendChild(idGroup);
       if (meta) {
         const accountFields = new Set(meta.accountFields ?? []);
-        const hasAccountReuse = opts.allowAccountReuse && accountFields.size > 0 && (opts.accountBackends?.length ?? 0) > 0;
+        const hasAccountReuse = !editing && opts.allowAccountReuse && accountFields.size > 0 && (opts.accountBackends?.length ?? 0) > 0;
         if (hasAccountReuse) {
           const accGroup = el("div", { className: "zfui-form-group" });
           accGroup.appendChild(el("label", { className: "zfui-form-label" }, "\u590D\u7528\u8D26\u6237\uFF08\u53EF\u9009\uFF09"));
@@ -28760,16 +29062,25 @@ var ZenFSConfigUI = (() => {
             });
             fg.appendChild(sel);
           } else {
+            const storedSecret = editing ? editing.options?.[field2.key] : void 0;
+            const isSecret = field2.type === "password";
+            const maskedHint = isSecret && storedSecret != null && storedSecret !== "" ? `\u5DF2\u4FDD\u5B58 ${maskSecret(storedSecret)}\uFF08\u7559\u7A7A\u4FDD\u6301\u4E0D\u53D8\uFF09` : field2.placeholder ?? "";
             const input = el("input", {
               className: "zfui-form-input",
-              type: field2.type === "password" ? "password" : "text",
+              type: isSecret ? "password" : "text",
               value: state.options[field2.key] ?? "",
-              placeholder: field2.placeholder ?? ""
+              placeholder: maskedHint
             });
+            if (isSecret && storedSecret != null && storedSecret !== "") {
+              input.title = "\u654F\u611F\u5B57\u6BB5\u9ED8\u8BA4\u8131\u654F\uFF1B\u76F4\u63A5\u8F93\u5165\u53EF\u8986\u76D6\uFF0C\u7559\u7A7A\u8868\u793A\u4FDD\u6301\u539F\u503C";
+            }
             on(input, "input", () => {
               state.options[field2.key] = input.value;
             });
             fg.appendChild(input);
+            if (isSecret && editing) {
+              fg.appendChild(el("div", { className: "zfui-form-hint" }, "\u7559\u7A7A = \u4FDD\u6301\u539F\u503C\uFF08\u4E0D\u4F1A\u4EE5\u660E\u6587\u663E\u793A\u5DF2\u4FDD\u5B58\u7684 token\uFF09"));
+            }
           }
           root.appendChild(fg);
         }
@@ -28782,6 +29093,19 @@ var ZenFSConfigUI = (() => {
       });
       descGroup.appendChild(descInput);
       root.appendChild(descGroup);
+      if (opts.confirm) {
+        const confirmGroup = el("div", { className: "zfui-form-group zfui-confirm-group" });
+        const confirmLabel = el("label", { className: "zfui-confirm-label" });
+        const confirmBox = el("input", { type: "checkbox" });
+        confirmBox.checked = state.confirmChecked;
+        on(confirmBox, "change", () => {
+          state.confirmChecked = confirmBox.checked;
+        });
+        confirmLabel.appendChild(confirmBox);
+        confirmLabel.appendChild(el("span", {}, opts.confirm.label));
+        confirmGroup.appendChild(confirmLabel);
+        root.appendChild(confirmGroup);
+      }
       if (state.submitError) {
         root.appendChild(el("div", { className: "zfui-form-error" }, state.submitError));
       }
@@ -28789,9 +29113,14 @@ var ZenFSConfigUI = (() => {
       const cancelBtn = el("button", { className: "zfui-btn" }, "\u53D6\u6D88");
       on(cancelBtn, "click", () => close2());
       actions.appendChild(cancelBtn);
-      const submitBtn = el("button", { className: "zfui-btn zfui-btn-primary" }, "\u8FDE\u63A5");
+      const submitBtn = el("button", { className: "zfui-btn zfui-btn-primary" }, opts.submitLabel ?? "\u8FDE\u63A5");
       on(submitBtn, "click", async () => {
         state.submitError = "";
+        if (opts.confirm && !state.confirmChecked) {
+          state.submitError = "\u8BF7\u5148\u52FE\u9009\u786E\u8BA4\u540E\u518D\u4FDD\u5B58";
+          render();
+          return;
+        }
         if (!state.id.trim()) {
           state.submitError = "\u8BF7\u586B\u5199\u540E\u7AEF ID";
           render();
@@ -28803,7 +29132,7 @@ var ZenFSConfigUI = (() => {
           return;
         }
         submitBtn.setAttribute("disabled", "true");
-        submitBtn.textContent = "\u8FDE\u63A5\u4E2D...";
+        submitBtn.textContent = editing ? "\u4FDD\u5B58\u4E2D..." : "\u8FDE\u63A5\u4E2D...";
         try {
           await onSubmit({
             id: state.id.trim(),
@@ -28815,7 +29144,7 @@ var ZenFSConfigUI = (() => {
         } catch (err2) {
           state.submitError = err2 instanceof Error ? err2.message : String(err2);
           submitBtn.removeAttribute("disabled");
-          submitBtn.textContent = "\u8FDE\u63A5";
+          submitBtn.textContent = opts.submitLabel ?? "\u8FDE\u63A5";
           render();
         }
       });
@@ -28904,6 +29233,13 @@ var ZenFSConfigUI = (() => {
       this.configBackends = [];
       this.dataGroups = [];
       this.dataBackends = [];
+      /** Display name of the config-sync group (null → default title). */
+      this.configGroupName = null;
+      /**
+       * Inline display-name editor state. `target` is `'config'` for the
+       * config-sync group or a data-group id. Kept in memory only.
+       */
+      this.groupNameEdit = null;
       /**
        * Live data-group instances loaded by `connect()` (keyed by group id). Only
        * these can report real sync status; a descriptor without an entry is shown
@@ -28930,7 +29266,7 @@ var ZenFSConfigUI = (() => {
     }
     // ── Version logging ──────────────────────────────────────────────────
     logVersion() {
-      const uiVersion = true ? "0.3.19" : "dev";
+      const uiVersion = true ? "0.3.21" : "dev";
       console.log(
         `%c[zen-fs-config-ui] v${uiVersion}%c (appId=${this.props.appId})`,
         "color:#2563eb;font-weight:bold",
@@ -29177,6 +29513,12 @@ var ZenFSConfigUI = (() => {
       } catch {
         this.configBackends = [];
       }
+      try {
+        const descriptor = await getConfigGroupDescriptor(this.repo);
+        this.configGroupName = descriptor?.name?.trim() || null;
+      } catch {
+        this.configGroupName = null;
+      }
     }
     async loadDataGroups() {
       if (!this.repo) return;
@@ -29394,6 +29736,178 @@ var ZenFSConfigUI = (() => {
       this.render();
     }
     // ── Rendering ────────────────────────────────────────────────────────
+    // ── Group display names (descriptor-only) ────────────────────────────
+    isEditingGroupName(target) {
+      return this.groupNameEdit?.target === target;
+    }
+    startGroupNameEdit(target, current) {
+      this.error = null;
+      this.groupNameEdit = { target, value: current, error: null, saving: false };
+      this.render();
+      const input = this.container.querySelector(".zfui-group-name-input");
+      input?.focus();
+      input?.select();
+    }
+    cancelGroupNameEdit() {
+      this.groupNameEdit = null;
+      this.error = null;
+      this.render();
+    }
+    /** Inline editor used by both the config-sync header and data-group cards. */
+    buildGroupNameEditor(target, current, label) {
+      const edit = this.groupNameEdit;
+      const wrap3 = el("div", { className: "zfui-group-name-edit" });
+      const input = el("input", {
+        className: "zfui-form-input zfui-group-name-input",
+        type: "text",
+        maxlength: String(GROUP_NAME_MAX_LENGTH2),
+        placeholder: `\u7EC4\u540D\uFF08\u6700\u591A ${GROUP_NAME_MAX_LENGTH2} \u4E2A\u5B57\u7B26\uFF09`,
+        "aria-label": label
+      });
+      input.value = current;
+      const errorEl = el("span", { className: "zfui-group-name-error" }, edit?.error ?? "");
+      const saveBtn = el("button", {
+        className: "zfui-btn zfui-btn-primary zfui-btn-sm",
+        type: "button"
+      }, "\u4FDD\u5B58");
+      const cancelBtn = el("button", {
+        className: "zfui-btn zfui-btn-secondary zfui-btn-sm",
+        type: "button"
+      }, "\u53D6\u6D88");
+      if (edit?.saving) {
+        saveBtn.disabled = true;
+        cancelBtn.disabled = true;
+        saveBtn.textContent = "\u4FDD\u5B58\u4E2D...";
+      }
+      const save = () => {
+        void this.handleSaveGroupName(target, input.value, errorEl);
+      };
+      on(input, "input", () => {
+        if (this.groupNameEdit) this.groupNameEdit.value = input.value;
+        errorEl.textContent = "";
+      });
+      on(input, "keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          save();
+        }
+        if (e.key === "Escape") {
+          e.preventDefault();
+          this.cancelGroupNameEdit();
+        }
+      });
+      on(saveBtn, "click", save);
+      on(cancelBtn, "click", () => this.cancelGroupNameEdit());
+      wrap3.appendChild(input);
+      wrap3.appendChild(saveBtn);
+      wrap3.appendChild(cancelBtn);
+      wrap3.appendChild(errorEl);
+      return wrap3;
+    }
+    /**
+     * Persist a display name. Only the descriptor changes (user requirement:
+     * 只改描述符，不动 pair、不动本地/远端数据). Sync pairs, local stores and
+     * remote data are untouched, so existing pairs keep working.
+     */
+    async handleSaveGroupName(target, rawValue, errorEl) {
+      if (!this.repo || !this.groupNameEdit) return;
+      const validation = validateGroupName(rawValue);
+      if (!validation.ok) {
+        this.groupNameEdit.value = rawValue;
+        this.groupNameEdit.error = validation.error;
+        if (errorEl) errorEl.textContent = validation.error;
+        return;
+      }
+      this.groupNameEdit.value = rawValue;
+      this.groupNameEdit.saving = true;
+      this.groupNameEdit.error = null;
+      try {
+        if (target === "config") {
+          await updateConfigGroupName(this.repo, validation.name);
+          this.configGroupName = validation.name;
+        } else {
+          await updateDataGroupName(this.repo, target, validation.name);
+          await this.loadDataGroups();
+        }
+        this.groupNameEdit = null;
+        this.error = null;
+        this.render();
+      } catch (err2) {
+        const message = `\u4FDD\u5B58\u7EC4\u540D\u5931\u8D25\uFF1A${err2 instanceof Error ? err2.message : String(err2)}`;
+        console.error("[zenfs-config-ui] rename group FAILED:", err2);
+        this.error = message;
+        if (this.groupNameEdit) {
+          this.groupNameEdit.saving = false;
+          this.groupNameEdit.error = message;
+        }
+        this.render();
+      }
+    }
+    // ── Backend parameter editing (destructive: rebuilds the pair) ───────
+    openBackendParamEditor(kind, groupId, backend) {
+      const oldOptions = backend.options ?? {};
+      const oldDescription = backend.description;
+      openBackendForm({
+        metadataList: this.metadata,
+        defaultType: backend.type,
+        initial: {
+          id: backend.id,
+          type: backend.type,
+          options: oldOptions,
+          description: oldDescription
+        },
+        notice: "\u4FEE\u6539\u53C2\u6570\u7B49\u4E8E\u6362\u4E00\u4E2A\u8FDC\u7AEF\u76EE\u6807\uFF1A\u65E7\u540C\u6B65\u5BF9\u4F1A\u62C6\u6389\u5E76\u91CD\u5EFA\uFF1B\u65E7\u8FDC\u7AEF\u5DF2\u6709\u6570\u636E\u4E0D\u4F1A\u81EA\u52A8\u8FC1\u79FB\u5230\u65B0\u76EE\u6807\uFF1B\u4FDD\u5B58\u540E\u4F1A\u7ACB\u5373\u5BF9\u65B0\u76EE\u6807\u505A\u4E00\u6B21\u521D\u59CB\u540C\u6B65\u3002\u540E\u7AEF id \u4FDD\u6301\u4E0D\u53D8\u3002\u654F\u611F\u5B57\u6BB5\u9ED8\u8BA4\u8131\u654F\uFF08\u53EA\u663E\u793A\u540E 4 \u4F4D\uFF09\uFF0C\u76F4\u63A5\u8F93\u5165\u53EF\u8986\u76D6\uFF0C\u7559\u7A7A\u8868\u793A\u4FDD\u6301\u539F\u503C\u3002\u82E5\u65B0\u53C2\u6570\u4E0E\u5DF2\u6709\u540E\u7AEF\u6307\u5411\u540C\u4E00\u8FDC\u7AEF\uFF08\u7C7B\u578B+\u53C2\u6570\u5B8C\u5168\u76F8\u540C\uFF09\uFF0C\u4FDD\u5B58\u4F1A\u88AB\u62D2\u7EDD\u5E76\u63D0\u793A\u91CD\u590D\u7684\u540E\u7AEF id\u3002",
+        confirm: { label: "\u6211\u5DF2\u77E5\u6653\uFF1A\u6539\u53C2\u6570\u4F1A\u91CD\u5EFA\u540C\u6B65\u5BF9\uFF0C\u65E7\u8FDC\u7AEF\u6570\u636E\u4E0D\u4F1A\u81EA\u52A8\u8FC1\u79FB" },
+        submitLabel: "\u786E\u8BA4\u4FEE\u6539\u5E76\u91CD\u5EFA\u540C\u6B65\u5BF9",
+        onSubmit: async (result) => {
+          const merged = { ...oldOptions, ...result.options };
+          const description = result.description || oldDescription;
+          await this.handleSaveBackendParams(
+            kind,
+            groupId,
+            backend.id,
+            backend.type,
+            merged,
+            description
+          );
+        },
+        onCancel: () => {
+        }
+      });
+    }
+    async handleSaveBackendParams(kind, groupId, id, type, options, description) {
+      if (!this.repo) throw new Error("\u914D\u7F6E\u4ED3\u5E93\u672A\u8FDE\u63A5");
+      if (kind === "data" && !groupId) throw new Error("\u7F3A\u5C11\u6570\u636E\u7EC4 id");
+      try {
+        if (kind === "config") {
+          await replaceConfigBackend(this.repo, id, type, options, description);
+          await this.loadConfigBackends();
+        } else {
+          const updated = await replaceDataGroupBackend(
+            this.repo,
+            groupId,
+            id,
+            type,
+            options,
+            description
+          );
+          this.groupInstances.set(groupId, updated);
+          if (this.dataGroup && this.dataGroup.groupId === groupId) {
+            this.dataGroup = updated;
+            this.dataBackends = listDataBackends(updated);
+          }
+          await this.loadDataGroups();
+        }
+        this.error = null;
+        this.render();
+      } catch (err2) {
+        const message = err2 instanceof Error ? err2.message : String(err2);
+        console.error("[zenfs-config-ui] update backend params FAILED:", err2);
+        this.error = `\u66F4\u65B0\u540E\u7AEF\u53C2\u6570\u5931\u8D25\uFF1A${message}`;
+        this.render();
+        throw err2;
+      }
+    }
     injectStyles() {
       this.styleEl = document.createElement("style");
       this.styleEl.textContent = STYLES;
@@ -29421,9 +29935,23 @@ var ZenFSConfigUI = (() => {
         return;
       }
       const header = el("div", { className: "zfui-header" });
-      const titleText = this.mode === "config-sync" ? "\u914D\u7F6E\u540C\u6B65\u7EC4" : this.mode === "data-sync" ? "\u6570\u636E\u540C\u6B65\u7EC4" : "\u540C\u6B65\u7EC4";
+      const titleText = this.mode === "config-sync" ? this.configGroupName ? `\u914D\u7F6E\u540C\u6B65\u7EC4 \xB7 ${this.configGroupName}` : "\u914D\u7F6E\u540C\u6B65\u7EC4" : this.mode === "data-sync" ? "\u6570\u636E\u540C\u6B65\u7EC4" : "\u540C\u6B65\u7EC4";
+      const titleRow = el("div", { className: "zfui-title-row" });
+      titleRow.appendChild(el("h1", { className: "zfui-title" }, titleText));
+      if (this.mode === "config-sync" && !this.isEditingGroupName("config")) {
+        const editBtn = el("button", {
+          className: "zfui-btn zfui-btn-secondary zfui-btn-sm zfui-group-name-btn",
+          type: "button",
+          title: "\u7F16\u8F91\u914D\u7F6E\u540C\u6B65\u7EC4\u7684\u663E\u793A\u540D\u79F0\uFF08\u53EA\u6539\u63CF\u8FF0\u7B26\uFF0C\u4E0D\u5F71\u54CD\u540E\u7AEF\u4E0E\u540C\u6B65\uFF09"
+        }, "\u7F16\u8F91");
+        on(editBtn, "click", () => this.startGroupNameEdit("config", this.configGroupName ?? ""));
+        titleRow.appendChild(editBtn);
+      }
+      if (this.mode === "config-sync" && this.isEditingGroupName("config")) {
+        titleRow.appendChild(this.buildGroupNameEditor("config", this.configGroupName ?? "", "\u914D\u7F6E\u540C\u6B65\u7EC4\u540D\u79F0"));
+      }
       header.appendChild(el("div", {}, [
-        el("h1", { className: "zfui-title" }, titleText),
+        titleRow,
         el("div", { className: "zfui-subtitle" }, this.getSubtitle())
       ]));
       if (this.backgroundConnecting) {
@@ -29485,7 +30013,16 @@ var ZenFSConfigUI = (() => {
       const list2 = el("ul", { className: "zfui-backend-list" });
       list2.appendChild(this.buildLocalBackendItem());
       for (const b of this.configBackends) {
-        list2.appendChild(this.buildBackendItem(b.id, b.type, b.options ?? {}, b.description, true));
+        list2.appendChild(this.buildBackendItem(
+          b.id,
+          b.type,
+          b.options ?? {},
+          b.description,
+          true,
+          void 0,
+          void 0,
+          () => this.openBackendParamEditor("config", null, b)
+        ));
       }
       syncSection.appendChild(list2);
       const addBtn = el("button", { className: "zfui-btn zfui-btn-primary" }, "+ \u6DFB\u52A0\u540E\u7AEF");
@@ -29529,7 +30066,24 @@ var ZenFSConfigUI = (() => {
       } else {
         for (const dg of this.dataGroups) {
           const card = el("div", { className: "zfui-data-group" });
-          card.appendChild(el("div", { className: "zfui-data-group-name" }, dg.id));
+          const nameRow = el("div", { className: "zfui-group-name-row" });
+          if (this.isEditingGroupName(dg.id)) {
+            nameRow.appendChild(el("div", { className: "zfui-data-group-name" }, dg.name || dg.id));
+            nameRow.appendChild(this.buildGroupNameEditor(dg.id, dg.name ?? "", "\u6570\u636E\u540C\u6B65\u7EC4\u540D\u79F0"));
+          } else {
+            nameRow.appendChild(el("div", { className: "zfui-data-group-name" }, dg.name || dg.id));
+            if (dg.name) {
+              nameRow.appendChild(el("span", { className: "zfui-group-id" }, `id: ${dg.id}`));
+            }
+            const editNameBtn = el("button", {
+              className: "zfui-btn zfui-btn-secondary zfui-btn-sm zfui-group-name-btn",
+              type: "button",
+              title: "\u7F16\u8F91\u8BE5\u7EC4\u7684\u663E\u793A\u540D\u79F0\uFF08\u53EA\u6539\u63CF\u8FF0\u7B26\uFF0C\u4E0D\u5F71\u54CD\u540E\u7AEF\u4E0E\u540C\u6B65\uFF09"
+            }, "\u7F16\u8F91");
+            on(editNameBtn, "click", () => this.startGroupNameEdit(dg.id, dg.name ?? ""));
+            nameRow.appendChild(editNameBtn);
+          }
+          card.appendChild(nameRow);
           const liveAtRender = this.groupInstances.get(dg.id);
           const backendStates = liveAtRender?.getBackendSyncStates() ?? /* @__PURE__ */ new Map();
           card.appendChild(this.buildStatusRow(
@@ -29553,7 +30107,8 @@ var ZenFSConfigUI = (() => {
                 b.description,
                 true,
                 () => void this.handleRemoveDataGroupBackend(dg.id, b.id),
-                backendStates.get(b.id)?.error
+                backendStates.get(b.id)?.error,
+                () => this.openBackendParamEditor("data", dg.id, b)
               ));
             }
           }
@@ -29601,7 +30156,16 @@ var ZenFSConfigUI = (() => {
       const list2 = el("ul", { className: "zfui-backend-list" });
       list2.appendChild(this.buildLocalBackendItem());
       for (const b of this.dataBackends) {
-        list2.appendChild(this.buildBackendItem(b.id, b.type, b.options ?? {}, b.description, true));
+        list2.appendChild(this.buildBackendItem(
+          b.id,
+          b.type,
+          b.options ?? {},
+          b.description,
+          true,
+          void 0,
+          void 0,
+          () => this.openBackendParamEditor("data", this.dataGroup?.groupId ?? "default", b)
+        ));
       }
       section.appendChild(list2);
       const addBtn = el("button", { className: "zfui-btn zfui-btn-primary" }, "+ \u6DFB\u52A0\u540E\u7AEF");
@@ -29706,7 +30270,7 @@ var ZenFSConfigUI = (() => {
       ]));
       return li;
     }
-    buildBackendItem(id, type, options, description, removable, onRemove, syncError) {
+    buildBackendItem(id, type, options, description, removable, onRemove, syncError, onEdit) {
       const meta = this.metadata.find((m) => m.type === type);
       const label = meta ? `${meta.icon} ${meta.label}` : type;
       const li = el("li", {
@@ -29765,6 +30329,14 @@ var ZenFSConfigUI = (() => {
         }
       });
       actions.appendChild(copyBtn);
+      if (onEdit) {
+        const editBtn = el("button", {
+          className: "zfui-btn zfui-btn-sm zfui-btn-secondary",
+          title: "\u7F16\u8F91\u540E\u7AEF\u53C2\u6570\uFF08\u66F4\u6362\u8FDC\u7AEF\u76EE\u6807\u5E76\u91CD\u5EFA\u540C\u6B65\u5BF9\uFF09"
+        }, "\u7F16\u8F91\u53C2\u6570");
+        on(editBtn, "click", onEdit);
+        actions.appendChild(editBtn);
+      }
       if (removable) {
         let confirming = false;
         const removeBtn = el("button", { className: "zfui-btn zfui-btn-sm zfui-btn-danger" }, "\u5220\u9664");

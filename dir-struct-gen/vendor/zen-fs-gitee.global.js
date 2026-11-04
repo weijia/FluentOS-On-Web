@@ -18664,18 +18664,82 @@ var ZenFSGitee = (() => {
     } catch {
     }
   }
-  var GiteeAPI = class {
+  var GiteeAPI = class _GiteeAPI {
     token;
     owner;
     repo;
+    /** User-configured branch. Never rewritten — fallbacks are runtime-only. */
     branch;
     baseUrl;
+    /**
+     * Branch actually used for API calls after a runtime fallback. `null` means
+     * the configured branch. Kept separate from `branch` so the user's config
+     * (and the UI) still shows what they typed.
+     */
+    resolvedBranch = null;
     constructor(options) {
       this.token = options.token;
       this.owner = options.owner;
       this.repo = options.repo;
       this.branch = options.branch || "master";
       this.baseUrl = options.baseUrl || "https://gitee.com/api/v5";
+    }
+    /** Branch used by every API call (configured, or the resolved default after a fallback). */
+    get currentBranch() {
+      return this.resolvedBranch ?? this.branch;
+    }
+    /** True when the configured branch was missing and a default branch was used instead. */
+    get fellBackToDefaultBranch() {
+      return this.resolvedBranch !== null && this.resolvedBranch !== this.branch;
+    }
+    static httpStatus(err2) {
+      const msg = err2 instanceof Error ? err2.message : String(err2);
+      const match = /Gitee API (\d+)/.exec(msg);
+      return match ? Number(match[1]) : null;
+    }
+    /**
+     * The tree endpoint returns 404 both for "repo missing/no permission" and
+     * "branch missing", so on a 404 ask the repository metadata (and, for empty
+     * repos, the branch list) which case we are in.
+     *
+     * @returns The default branch to retry with, or `null` when the caller
+     *          should surface the original 404.
+     */
+    async resolveBranchFallback() {
+      let meta;
+      try {
+        meta = await this.request(`/repos/${this.owner}/${this.repo}`);
+      } catch (err2) {
+        if (_GiteeAPI.httpStatus(err2) === 404) {
+          throw new Error(
+            `Gitee \u4ED3\u5E93 ${this.owner}/${this.repo} \u4E0D\u5B58\u5728\u6216\u65E0\u6743\u8BBF\u95EE\uFF08\u8BF7\u68C0\u67E5 owner/repo \u548C token \u6743\u9650\uFF09`
+          );
+        }
+        log2.log(
+          `\u8BFB\u53D6\u4ED3\u5E93\u4FE1\u606F\u5931\u8D25\uFF08${err2 instanceof Error ? err2.message : String(err2)}\uFF09\uFF0C\u4FDD\u7559\u539F\u59CB\u5206\u652F\u9519\u8BEF`
+        );
+        return null;
+      }
+      let branchCount = null;
+      try {
+        const list2 = await this.request(`/repos/${this.owner}/${this.repo}/branches`);
+        branchCount = Array.isArray(list2) ? list2.length : null;
+      } catch {
+      }
+      if (branchCount === 0) {
+        throw new Error(
+          `Gitee \u4ED3\u5E93 ${this.owner}/${this.repo} \u4E3A\u7A7A\uFF08\u65E0\u4EFB\u4F55\u5206\u652F/\u63D0\u4EA4\uFF09\uFF0C\u65E0\u6CD5\u8BFB\u53D6\u6587\u4EF6\u6811\uFF1A\u8BF7\u5148\u5728 Gitee \u7F51\u9875\u4E0A\u5B8C\u6210\u4E00\u6B21\u521D\u59CB\u5316\u63D0\u4EA4\uFF08\u4F8B\u5982\u521B\u5EFA README\uFF09\u540E\u518D\u91CD\u8BD5`
+        );
+      }
+      const defaultBranch = meta?.default_branch || void 0;
+      if (!defaultBranch || defaultBranch === this.branch) {
+        log2.log(
+          `\u6307\u5B9A\u5206\u652F '${this.branch}' \u4E0D\u5B58\u5728\uFF0C\u4E14\u6CA1\u6709\u53EF\u7528\u7684\u9ED8\u8BA4\u5206\u652F\uFF08\u4ED3\u5E93\u672A\u8FD4\u56DE default_branch\uFF09\uFF0C\u4FDD\u7559\u539F\u59CB\u9519\u8BEF`
+        );
+        return null;
+      }
+      log2.log(`\u6307\u5B9A\u5206\u652F '${this.branch}' \u4E0D\u5B58\u5728\uFF0C\u5DF2\u56DE\u843D\u5230\u9ED8\u8BA4\u5206\u652F '${defaultBranch}'`);
+      return defaultBranch;
     }
     async request(path, init2) {
       const separator = path.includes("?") ? "&" : "?";
@@ -18699,10 +18763,18 @@ var ZenFSGitee = (() => {
     // Read-only Git Data API (supported by Gitee)
     // -----------------------------------------------------------------------
     async getTree(recursive = true) {
-      const data = await this.request(
-        `/repos/${this.owner}/${this.repo}/git/trees/${this.branch}?recursive=${recursive ? 1 : 0}`
-      );
-      return data.tree || [];
+      const treePath = (branch) => `/repos/${this.owner}/${this.repo}/git/trees/${branch}?recursive=${recursive ? 1 : 0}`;
+      try {
+        const data = await this.request(treePath(this.currentBranch));
+        return data.tree || [];
+      } catch (err2) {
+        if (_GiteeAPI.httpStatus(err2) !== 404) throw err2;
+        const fallback = await this.resolveBranchFallback();
+        if (!fallback) throw err2;
+        const data = await this.request(treePath(fallback));
+        this.resolvedBranch = fallback;
+        return data.tree || [];
+      }
     }
     /**
      * Get the latest commit SHA of a branch.
@@ -18714,7 +18786,7 @@ var ZenFSGitee = (() => {
      * supported by Gitee and returns the branch's head commit SHA under
      * `commit.sha`.
      */
-    async getBranchSha(branch) {
+    async getBranchSha(branch = this.currentBranch) {
       const data = await this.request(`/repos/${this.owner}/${this.repo}/branches/${branch}`);
       return data?.commit?.sha ?? null;
     }
@@ -18742,10 +18814,10 @@ var ZenFSGitee = (() => {
     // Contents API (GET / POST / PUT / DELETE — all supported by Gitee)
     // -----------------------------------------------------------------------
     async getContents(path) {
-      return this.request(`/repos/${this.owner}/${this.repo}/contents/${apiPath(path)}?ref=${this.branch}`);
+      return this.request(`/repos/${this.owner}/${this.repo}/contents/${apiPath(path)}?ref=${this.currentBranch}`);
     }
     async getRaw(path) {
-      return this.request(`/repos/${this.owner}/${this.repo}/raw/${apiPath(path)}?ref=${this.branch}`);
+      return this.request(`/repos/${this.owner}/${this.repo}/raw/${apiPath(path)}?ref=${this.currentBranch}`);
     }
     /**
      * Create a new file via Contents API. Returns the new blob SHA.
@@ -18757,15 +18829,24 @@ var ZenFSGitee = (() => {
       if (content.length === 0) {
         content = new TextEncoder().encode("\n");
       }
-      const data = await this.request(`/repos/${this.owner}/${this.repo}/contents/${apiPath(path)}?branch=${this.branch}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          content: encodeBase64(content),
-          message
-        })
-      });
-      return data?.content?.sha || "";
+      try {
+        const data = await this.request(`/repos/${this.owner}/${this.repo}/contents/${apiPath(path)}?branch=${this.currentBranch}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            content: encodeBase64(content),
+            message
+          })
+        });
+        return data?.content?.sha || "";
+      } catch (err2) {
+        if (_GiteeAPI.httpStatus(err2) === 404) {
+          throw new Error(
+            `Gitee \u4ED3\u5E93 ${this.owner}/${this.repo} \u65E0\u6CD5\u5199\u5165\uFF1A\u5206\u652F '${this.currentBranch}' \u4E0D\u5B58\u5728\u6216\u4ED3\u5E93\u4E3A\u7A7A\u3002\u82E5\u4ED3\u5E93\u4E3A\u7A7A\uFF0C\u8BF7\u5148\u5728 Gitee \u7F51\u9875\u4E0A\u5B8C\u6210\u4E00\u6B21\u521D\u59CB\u5316\u63D0\u4EA4\uFF08\u4F8B\u5982\u521B\u5EFA README\uFF09\u540E\u518D\u5199\u5165`
+          );
+        }
+        throw err2;
+      }
     }
     /**
      * Update an existing file via Contents API. Returns the new blob SHA.
@@ -18777,7 +18858,7 @@ var ZenFSGitee = (() => {
         content = new TextEncoder().encode("\n");
       }
       try {
-        const data = await this.request(`/repos/${this.owner}/${this.repo}/contents/${apiPath(path)}?branch=${this.branch}`, {
+        const data = await this.request(`/repos/${this.owner}/${this.repo}/contents/${apiPath(path)}?branch=${this.currentBranch}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -18793,7 +18874,7 @@ var ZenFSGitee = (() => {
           log2.warn(`SHA mismatch for ${path}, refreshing SHA and retrying...`);
           const freshSha = await this.getFileSha(path);
           if (freshSha) {
-            const data = await this.request(`/repos/${this.owner}/${this.repo}/contents/${apiPath(path)}?branch=${this.branch}`, {
+            const data = await this.request(`/repos/${this.owner}/${this.repo}/contents/${apiPath(path)}?branch=${this.currentBranch}`, {
               method: "PUT",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
@@ -18828,7 +18909,7 @@ var ZenFSGitee = (() => {
           log2.warn(`SHA mismatch for delete ${path}, refreshing SHA and retrying...`);
           const freshSha = await this.getFileSha(path);
           if (freshSha) {
-            await this.request(`/repos/${this.owner}/${this.repo}/contents/${apiPath(path)}?branch=${this.branch}`, {
+            await this.request(`/repos/${this.owner}/${this.repo}/contents/${apiPath(path)}?branch=${this.currentBranch}`, {
               method: "DELETE",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
@@ -18865,7 +18946,7 @@ var ZenFSGitee = (() => {
     async getLastCommit(path) {
       try {
         const commits = await this.request(
-          `/repos/${this.owner}/${this.repo}/commits?path=${apiPath(path)}&ref=${this.branch}&per_page=1`
+          `/repos/${this.owner}/${this.repo}/commits?path=${apiPath(path)}&ref=${this.currentBranch}&per_page=1`
         );
         if (Array.isArray(commits) && commits.length > 0) {
           const commit = commits[0];
@@ -19028,18 +19109,11 @@ var ZenFSGitee = (() => {
     async init() {
       if (this.initialized) return;
       await this.loadFromIDB();
-      let tree = [];
-      try {
-        tree = await this.api.getTree(true);
-      } catch (err2) {
-        const msg = err2.message || "";
-        if (msg.includes("404") || msg.includes("Not Found") || msg.includes("not found")) {
-          log3.log(`Branch '${this.options.branch}' not found, attempting to create...`);
-          await this.api.createBranch(this.options.branch || "master", "master");
-          tree = await this.api.getTree(true);
-        } else {
-          throw err2;
-        }
+      const tree = await this.api.getTree(true);
+      if (this.api.fellBackToDefaultBranch) {
+        log3.log(
+          `configured branch '${this.options.branch}' was not found; using default branch '${this.api.currentBranch}'`
+        );
       }
       const freshPaths = /* @__PURE__ */ new Set();
       const shaUpdates = [];
