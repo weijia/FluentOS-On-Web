@@ -17670,6 +17670,26 @@ var ZenFSRemoteStorage = (() => {
   function isMtimeSidecar(name) {
     return name.endsWith(".mtime") && name.length > 6;
   }
+  function sidecarToDataPath(sidecarPath) {
+    const lastSlash = sidecarPath.lastIndexOf("/");
+    const dir = lastSlash >= 0 ? sidecarPath.slice(0, lastSlash) : "";
+    const fileName = lastSlash >= 0 ? sidecarPath.slice(lastSlash + 1) : sidecarPath;
+    if (!fileName.endsWith(".mtime")) return null;
+    const dataFilename = fileName.slice(0, -6);
+    if (dataFilename === "") return null;
+    return dir ? `${dir}/${dataFilename}` : dataFilename;
+  }
+  var DOT_META_SUFFIXES = [".mtime", ".version"];
+  function isDotMetaSidecar(name) {
+    if (!name.startsWith(".")) return false;
+    return DOT_META_SUFFIXES.some((s) => name.includes(s));
+  }
+  function isDoubleDotFile(name) {
+    return name.startsWith("..");
+  }
+  function isMetadataSidecarToDelete(name) {
+    return isDotMetaSidecar(name) || isDoubleDotFile(name);
+  }
 
   // node_modules/@richard432/localstorage-logger/dist/index.mjs
   var PREFIX = "debug:";
@@ -18490,7 +18510,7 @@ var ZenFSRemoteStorage = (() => {
           const parentDir2 = parentPath2 ? `/${parentPath2}/` : "/";
           await this.patchDirListingEntry(parentDir2, getBasename(path), null);
           await this.flushSaveNow();
-          if (this.usePreciseMtime) {
+          if (this.usePreciseMtime && !isMtimeSidecar(path)) {
             await this.deleteMtimeSidecar(path);
           }
           this.updateSnapshotForPath(path, null);
@@ -18505,7 +18525,7 @@ var ZenFSRemoteStorage = (() => {
         const parentDir = parentPath ? `/${parentPath}/` : "/";
         await this.patchDirListingEntry(parentDir, getBasename(path), null);
         await this.flushSaveNow();
-        if (this.usePreciseMtime) {
+        if (this.usePreciseMtime && !isMtimeSidecar(path)) {
           await this.deleteMtimeSidecar(path);
         }
         this.updateSnapshotForPath(path, null);
@@ -18531,9 +18551,23 @@ var ZenFSRemoteStorage = (() => {
           this.logger.logResult("readdir", path, "DirectoryNotFoundError", false);
           throw new DirectoryNotFoundError(path);
         }
+        const entryNames = new Set(entries2.keys());
         const names = [];
         for (const [name] of entries2) {
-          if (!isMtimeSidecar(name)) names.push(name);
+          if (name === ".keep") continue;
+          if (isMtimeSidecar(name)) {
+            const dataName = sidecarToDataPath(name);
+            const orphaned = name.endsWith(".mtime.mtime") || // pathological nested sidecar
+            !dataName || !entryNames.has(dataName);
+            if (orphaned) {
+              const full = `${path}${name}`;
+              loggers.dir.log(`[RS-READDIR] pruning orphaned mtime sidecar: ${full}`);
+              void this.unlink(full).catch(() => {
+              });
+            }
+            continue;
+          }
+          names.push(name);
         }
         loggers.dir.log(`[RS-READDIR] readdir(${path}) backend=${this.backendName}: ${entries2.size} entries, returning ${names.length} visible names`);
         this.logger.logResult("readdir", path, `count=${names.length} [${names.join(", ")}]`);
@@ -18548,6 +18582,57 @@ var ZenFSRemoteStorage = (() => {
           `Failed to read directory ${path}: ${error instanceof Error ? error.message : String(error)}`
         );
       }
+    }
+    /**
+     * Recursively delete `.mtime` sidecar files whose data file no longer
+     * exists in remote storage (orphaned sidecars). Returns the number of
+     * sidecars removed. Safe to call at any time; each deletion is best-effort.
+     *
+     * NOTE: `readdir()` and the snapshot builder already prune orphans on the
+     * fly during normal operation; this method forces a full walk for an
+     * explicit, on-demand cleanup (e.g. from a maintenance task).
+     */
+    async pruneOrphanedMtimeSidecars(root = "/") {
+      let removed = 0;
+      const stack = [root];
+      while (stack.length) {
+        const dir = stack.pop();
+        let entries2;
+        try {
+          entries2 = await this.ensureDirListing(dir);
+        } catch {
+          continue;
+        }
+        if (!entries2) continue;
+        const entryNames = new Set(entries2.keys());
+        for (const [name, entry] of entries2) {
+          if (entry.isDir) {
+            stack.push(joinPath(dir, name));
+            continue;
+          }
+          if (isMetadataSidecarToDelete(name)) {
+            const full = joinPath(dir, name);
+            try {
+              await this.unlink(full);
+              removed++;
+            } catch {
+            }
+            continue;
+          }
+          if (!isMtimeSidecar(name)) continue;
+          const dataName = sidecarToDataPath(name);
+          const orphaned = name.endsWith(".mtime.mtime") || !dataName || !entryNames.has(dataName);
+          if (orphaned) {
+            const full = joinPath(dir, name);
+            try {
+              await this.unlink(full);
+              removed++;
+            } catch {
+            }
+          }
+        }
+      }
+      return removed;
     }
     /**
      * Parse HTML directory listing (fallback)
@@ -18625,13 +18710,13 @@ var ZenFSRemoteStorage = (() => {
           throw new RemoteStorageError(`Not a directory: ${path}`);
         }
         const entries2 = await this.readdir(path);
-        if (entries2.length > 1 || entries2.length === 1 && entries2[0] !== ".keep") {
+        if (entries2.length > 0) {
           this.logger.logResult("rmdir", path, `Directory not empty: [${entries2.join(", ")}]`, false);
-          throw new RemoteStorageError(`Directory not empty (except .keep): ${path}`);
+          throw new RemoteStorageError(`Directory not empty: ${path}`);
         }
-        if (entries2.includes(".keep")) {
-          const keepFilePath = joinPath(path, ".keep");
-          await this.unlink(keepFilePath);
+        try {
+          await this.unlink(joinPath(path, ".keep"));
+        } catch {
         }
         this.logger.logResult("rmdir", path, "OK");
         this.removeFromExistenceCache(path);
@@ -19895,9 +19980,23 @@ var ZenFSRemoteStorage = (() => {
             }
           }
         }
+        const itemNames = new Set(items.map((i) => i.name));
         for (const item of items) {
           const itemPath = dirPath === "/" ? item.name : `${dirPath}/${item.name}`;
+          if (isMetadataSidecarToDelete(item.name)) {
+            loggers.dir.log(`[RS-SNAPSHOT] deleting stale dotfile: ${itemPath}`);
+            void this.unlink(itemPath).catch(() => {
+            });
+            continue;
+          }
           if (isMtimeSidecar(item.name)) {
+            const dataName = sidecarToDataPath(item.name);
+            const orphaned = item.name.endsWith(".mtime.mtime") || !dataName || !itemNames.has(dataName);
+            if (orphaned) {
+              loggers.dir.log(`[RS-SNAPSHOT] pruning orphaned mtime sidecar: ${itemPath}`);
+              void this.unlink(itemPath).catch(() => {
+              });
+            }
             continue;
           }
           if (item.etag) {
