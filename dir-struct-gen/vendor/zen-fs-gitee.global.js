@@ -18590,6 +18590,11 @@ var ZenFSGitee = (() => {
   function isMetadataSidecarToDelete(name) {
     return isDotMetaSidecar(name) || isDoubleDotFile(name);
   }
+  function isKeepPlaceholderSidecar(nameOrPath) {
+    const slash = nameOrPath.lastIndexOf("/");
+    const base = slash >= 0 ? nameOrPath.slice(slash + 1) : nameOrPath;
+    return base === ".keep.mtime";
+  }
 
   // node_modules/@richard432/localstorage-logger/dist/index.mjs
   var PREFIX = "debug:";
@@ -19396,6 +19401,23 @@ var ZenFSGitee = (() => {
       this._deleteMtime(path);
       this.index.delete(path);
     }
+    /**
+     * `unlink()` for hidden sidecars.
+     *
+     * `.mtime` sidecars live only in `shaCache` and are deliberately absent from
+     * the Index, so `IndexFS.unlink()` would throw ENOENT before `remove()` could
+     * delete the blob. Route them straight through the Contents API — this is
+     * what lets a `<dir>/.keep.mtime` / `<file>.mtime` tombstone actually take
+     * effect (zen-fs-config unlinks exactly those paths).
+     */
+    async unlink(path) {
+      if (path.endsWith(".mtime") && !this.index.has(path)) {
+        const deleted = await this.deleteSidecar(path);
+        if (!deleted) throw withErrno("ENOENT");
+        return;
+      }
+      await super.unlink(path);
+    }
     // --- Read ---
     async read(path, buffer, start, end) {
       if (end - start <= 0) return;
@@ -19785,7 +19807,7 @@ var ZenFSGitee = (() => {
         const sidecarByData = /* @__PURE__ */ new Map();
         for (const item of tree) {
           if (item.type === "tree") continue;
-          if (isMetadataSidecarToDelete(item.path)) continue;
+          if (isMetadataSidecarToDelete(item.path) || isKeepPlaceholderSidecar(item.path)) continue;
           const dataPath = sidecarToDataPath(item.path);
           if (dataPath) sidecarByData.set("/" + dataPath, "/" + item.path);
         }
@@ -19868,6 +19890,8 @@ var ZenFSGitee = (() => {
           if (item.type === "tree") continue;
           if (isMetadataSidecarToDelete(item.path)) {
             metadataSidecars.push({ path: item.path, sha: item.sha });
+          } else if (isKeepPlaceholderSidecar(item.path)) {
+            metadataSidecars.push({ path: item.path, sha: item.sha });
           } else {
             const dataPath = sidecarToDataPath(item.path);
             if (dataPath) suffixSidecars.push({ path: item.path, sha: item.sha });
@@ -19922,18 +19946,78 @@ var ZenFSGitee = (() => {
       return super.mkdir(path, opts);
     }
     async rmdir(path) {
+      const dir = path.endsWith("/") ? path.slice(0, -1) : path;
+      let realEntriesRemain = true;
       try {
-        await super.unlink(
-          `${path.endsWith("/") ? path.slice(0, -1) : path}/.keep`
-        );
+        const names = await super.readdir(dir);
+        realEntriesRemain = names.some((n) => n !== ".keep");
       } catch {
+        realEntriesRemain = false;
       }
+      await this.removeKeepArtifacts(dir);
+      if (!realEntriesRemain) await this.pruneOrphanSidecarsInDir(dir);
       await super.rmdir(path);
     }
     /** `<dir>/.keep` path for a directory or a file inside it. */
     keepPlaceholderPath(dirOrFile) {
       const dir = dirOrFile.endsWith("/") ? dirOrFile.slice(0, -1) : dirOrFile.replace(/\/[^/]+$/, "") || "/";
       return `${dir === "/" ? "" : dir}/.keep`;
+    }
+    /**
+     * Delete only the remote blob for an `.mtime` sidecar (without running
+     * the data-file removal path, which would recurse back into keep cleanup).
+     */
+    async deleteSidecar(path) {
+      const sha = this.shaCache.get(path);
+      if (!sha) return false;
+      await this.api.deleteFile(path, sha, `Delete mtime sidecar ${path}`);
+      this.shaCache.delete(path);
+      this._deleteSha(path);
+      this._deleteContent(path);
+      this._deleteMtime(path);
+      this.mtimeCache.delete(path);
+      return true;
+    }
+    /**
+     * Remove the `.keep` placeholder and its `.keep.mtime` sidecar.
+     * `.keep` is hidden from readdir(), so `exists()` may be false while the
+     * sidecar blob is still present; delete it via the sha cache regardless.
+     */
+    async removeKeepArtifacts(dir) {
+      const keepPath = `${dir === "/" ? "" : dir}/.keep`;
+      try {
+        if (await this.exists(keepPath)) {
+          await super.unlink(keepPath);
+        }
+      } catch {
+      }
+      try {
+        await this.deleteSidecar(mtimePathFor(keepPath));
+      } catch {
+      }
+    }
+    /**
+     * Best-effort cleanup of orphaned `.mtime` sidecars left in a directory
+     * whose real files are gone (e.g. `<dir>/.keep.mtime` alone keeping a
+     * ghost directory alive in Git).
+     */
+    async pruneOrphanSidecarsInDir(dir) {
+      const prefix = dir === "/" ? "/" : `${dir}/`;
+      for (const full of Array.from(this.shaCache.keys())) {
+        if (!full.startsWith(prefix)) continue;
+        const rel = full.slice(prefix.length);
+        if (!rel || rel.includes("/")) continue;
+        if (this.index.has(full)) continue;
+        const mapped = sidecarToDataPath(full);
+        if (!mapped) continue;
+        const dataPath = mapped.startsWith("/") ? mapped : `/${mapped}`;
+        if (this.index.has(dataPath)) continue;
+        try {
+          await this.deleteSidecar(full);
+        } catch (e) {
+          log3.warn(`pruneOrphanSidecarsInDir(${dir}): failed to delete ${full}:`, e);
+        }
+      }
     }
     /**
      * Drop a lingering `.keep` placeholder once a real file is written
@@ -19944,23 +20028,23 @@ var ZenFSGitee = (() => {
     async dropKeepPlaceholder(dirOrFile) {
       const keepPath = this.keepPlaceholderPath(dirOrFile);
       if (keepPath === dirOrFile) return;
+      const dir = keepPath.slice(0, keepPath.lastIndexOf("/")) || "/";
       try {
-        if (await this.exists(keepPath)) {
-          await super.unlink(keepPath);
-        }
+        await this.removeKeepArtifacts(dir);
       } catch {
       }
     }
-    /** After a delete, drop `.keep` when no real entries remain in the directory. */
+    /** After a delete, drop `.keep` and its sidecar when no real entries remain. */
     async dropKeepIfDirBecameEmpty(removedPath) {
       const keepPath = this.keepPlaceholderPath(removedPath);
       if (keepPath === removedPath) return;
+      const dir = keepPath.slice(0, keepPath.lastIndexOf("/")) || "/";
       try {
-        if (!await this.exists(keepPath)) return;
-        const dir = keepPath.slice(0, keepPath.lastIndexOf("/")) || "/";
         const names = await super.readdir(dir);
-        if (names.some((n) => n !== ".keep")) return;
-        await super.unlink(keepPath);
+        const hasRealEntries = names.some((n) => n !== ".keep" && !isKeepPlaceholderSidecar(n));
+        if (hasRealEntries) return;
+        await this.removeKeepArtifacts(dir);
+        await this.pruneOrphanSidecarsInDir(dir);
       } catch {
       }
     }
@@ -19979,12 +20063,25 @@ var ZenFSGitee = (() => {
       const sidecarItems = [];
       for (const item of tree) {
         if (item.type === "tree") continue;
-        if (isMetadataSidecarToDelete(item.path)) continue;
+        if (isMetadataSidecarToDelete(item.path) || isKeepPlaceholderSidecar(item.path)) continue;
         const dataPath = sidecarToDataPath(item.path);
         if (dataPath) sidecarItems.push({ path: item.path, sha: item.sha });
         else allDataPaths.add(item.path);
       }
       let removed = 0;
+      for (const item of tree) {
+        if (item.type === "tree" || !isKeepPlaceholderSidecar(item.path)) continue;
+        if (normalizedRoot && item.path !== normalizedRoot && !item.path.startsWith(normalizedRoot + "/")) continue;
+        const full = "/" + item.path;
+        try {
+          await this.api.deleteFile(full, item.sha, `Prune keep placeholder sidecar ${full}`);
+          this.shaCache.delete(full);
+          this._deleteSha(full);
+          removed++;
+        } catch (e) {
+          log3.warn(`pruneOrphanedMtimeSidecars: failed to delete ${full}:`, e);
+        }
+      }
       for (const sc of sidecarItems) {
         if (normalizedRoot && sc.path !== normalizedRoot && !sc.path.startsWith(normalizedRoot + "/")) continue;
         const dataPath = sidecarToDataPath(sc.path);
@@ -20021,7 +20118,7 @@ var ZenFSGitee = (() => {
       for (const item of tree) {
         if (item.type === "tree") continue;
         if (normalizedRoot && item.path !== normalizedRoot && !item.path.startsWith(normalizedRoot + "/")) continue;
-        if (!isMetadataSidecarToDelete(item.path)) continue;
+        if (!isMetadataSidecarToDelete(item.path) && !isKeepPlaceholderSidecar(item.path)) continue;
         const full = "/" + item.path;
         try {
           await this.api.deleteFile(full, item.sha, `Delete dot-meta sidecar ${full}`);
