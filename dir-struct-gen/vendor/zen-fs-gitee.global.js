@@ -19364,6 +19364,7 @@ var ZenFSGitee = (() => {
       this.mtimeCache.delete(path);
       this._deleteMtime(path);
       this.index.delete(path);
+      await this.dropKeepIfDirBecameEmpty(path);
     }
     removeSync(path) {
       const sidecarPath = mtimePathFor(path);
@@ -19452,6 +19453,9 @@ var ZenFSGitee = (() => {
       this._persistContent(path, writeContent);
       if (!this.options.useCommitTimeAsMtime) {
         await this.writeMtimeSidecar(path, effectiveMtime);
+      }
+      if (path !== ".keep" && !sidecarToDataPath(path)) {
+        await this.dropKeepPlaceholder(path);
       }
     }
     writeSync(path, data, offset, mtimeMs) {
@@ -19915,15 +19919,7 @@ var ZenFSGitee = (() => {
     }
     async mkdir(path, options) {
       const opts = options ?? { mode: S_IFDIR | 493 };
-      const result = await super.mkdir(path, opts);
-      const keepPath = `${path.endsWith("/") ? path.slice(0, -1) : path}/.keep`;
-      try {
-        if (!await this.exists(keepPath)) {
-          await this.writeFile(keepPath, "\n");
-        }
-      } catch {
-      }
-      return result;
+      return super.mkdir(path, opts);
     }
     async rmdir(path) {
       try {
@@ -19933,6 +19929,40 @@ var ZenFSGitee = (() => {
       } catch {
       }
       await super.rmdir(path);
+    }
+    /** `<dir>/.keep` path for a directory or a file inside it. */
+    keepPlaceholderPath(dirOrFile) {
+      const dir = dirOrFile.endsWith("/") ? dirOrFile.slice(0, -1) : dirOrFile.replace(/\/[^/]+$/, "") || "/";
+      return `${dir === "/" ? "" : dir}/.keep`;
+    }
+    /**
+     * Drop a lingering `.keep` placeholder once a real file is written
+     * into the directory — the directory no longer needs help to exist,
+     * and keeping the placeholder would leave a ghost directory behind
+     * after that file is deleted.
+     */
+    async dropKeepPlaceholder(dirOrFile) {
+      const keepPath = this.keepPlaceholderPath(dirOrFile);
+      if (keepPath === dirOrFile) return;
+      try {
+        if (await this.exists(keepPath)) {
+          await super.unlink(keepPath);
+        }
+      } catch {
+      }
+    }
+    /** After a delete, drop `.keep` when no real entries remain in the directory. */
+    async dropKeepIfDirBecameEmpty(removedPath) {
+      const keepPath = this.keepPlaceholderPath(removedPath);
+      if (keepPath === removedPath) return;
+      try {
+        if (!await this.exists(keepPath)) return;
+        const dir = keepPath.slice(0, keepPath.lastIndexOf("/")) || "/";
+        const names = await super.readdir(dir);
+        if (names.some((n) => n !== ".keep")) return;
+        await super.unlink(keepPath);
+      } catch {
+      }
     }
     /**
     * Recursively delete `.mtime` sidecar files whose data file no longer
