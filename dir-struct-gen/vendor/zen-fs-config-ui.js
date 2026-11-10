@@ -30166,7 +30166,8 @@ var ZenFSConfigUI = (() => {
     await dataGroup.removeBackend(id);
   }
   function listDataBackends(dataGroup) {
-    return dataGroup.listBackends();
+    const declared = typeof dataGroup.listDeclaredBackends === "function" ? dataGroup.listDeclaredBackends() : null;
+    return declared && declared.length > 0 ? declared : dataGroup.listBackends();
   }
 
   // src/core/group-name.ts
@@ -30789,7 +30790,7 @@ var ZenFSConfigUI = (() => {
     }
     // ── Version logging ──────────────────────────────────────────────────
     logVersion() {
-      const uiVersion = true ? "0.3.23" : "dev";
+      const uiVersion = true ? "0.3.24" : "dev";
       console.log(
         `%c[zen-fs-config-ui] v${uiVersion}%c (appId=${this.props.appId})`,
         "color:#2563eb;font-weight:bold",
@@ -31551,11 +31552,15 @@ var ZenFSConfigUI = (() => {
       }));
       for (const dg of this.dataGroups) {
         const live = () => this.groupInstances.get(dg.id);
+        const instance = live();
         list2.appendChild(this.buildGroupCard({
           kind: "data",
           id: dg.id,
           name: dg.name ?? null,
-          backends: dg.backends,
+          // The descriptor under `.config/app-data-groups/` is only a bootstrap
+          // copy and can lag behind; the group's `.meta/backends/` wins whenever
+          // the group is instantiated in this session.
+          backends: instance ? listDataBackends(instance) : dg.backends,
           // Each data-group card reads its OWN live instance's status, so two
           // groups never share numbers (their sync engines are separate).
           read: () => {
