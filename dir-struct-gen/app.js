@@ -77,6 +77,8 @@ const diagState = {
   instantiate: null,
   plan: null,
   manifest: null,
+  storage: null,   // { groupId, storeName, error }：本地数据组存储损坏（需要重建）
+  rebuilt: [],     // 本页启动时执行过的重建记录
   errors: [],
 };
 
@@ -99,6 +101,51 @@ function maskSecrets(value) {
 
 function errText(err) {
   return maskSecrets((err && (err.stack || err.message)) || String(err));
+}
+
+// 本地数据组存储不可用（IndexedDB 记录丢失 / EIO）：可与“没有可用组”区分。
+// 不依赖 vendor 版本，直接按 code/name 穿透 cause 链识别。
+function isLocalStorageError(err) {
+  let cur = err;
+  for (let depth = 0; cur && depth < 6; depth++) {
+    if (cur.code === 'LOCAL_STORAGE_UNAVAILABLE') return true;
+    if (cur.name === 'NotReadableError') return true;
+    if (cur.code === 'EIO') return true;
+    cur = cur.cause;
+  }
+  return false;
+}
+
+// 统一的“需要重建”提示：文案来自 zen-fs-config-ui（若可用），否则用本地兜底文案。
+function describeStorageFailure(err, groupId) {
+  const ZF = window.ZenFSConfigUI;
+  if (ZF && typeof ZF.describeDataGroupError === 'function') {
+    const info = ZF.describeDataGroupError(err, ZF_APP_ID, groupId);
+    if (info.kind === 'local-storage-unavailable') {
+      return { groupId, storeName: info.storeName, error: info.message };
+    }
+  }
+  return {
+    groupId,
+    storeName: groupId === 'default'
+      ? 'zen-fs-config-data-' + ZF_APP_ID
+      : 'zen-fs-config-data-' + ZF_APP_ID + '-' + groupId,
+    error: '本地数据组存储已损坏，需要重建：' + (errText(err) || 'IndexedDB 记录不可读')
+      + '\n重建会删除本地未同步的改动（远端数据不受影响），并从远端重新拉取。',
+  };
+}
+
+function setStorageBanner(info) {
+  if (!dom.storageBanner) return;
+  if (!info) {
+    dom.storageBanner.hidden = true;
+    return;
+  }
+  dom.storageBanner.hidden = false;
+  if (dom.storageDetail) {
+    dom.storageDetail.textContent = '数据组：' + info.groupId + '　本地库：' + (info.storeName || '(未知)')
+      + '\n' + info.error;
+  }
 }
 
 function diagPushError(label, err) {
@@ -165,12 +212,25 @@ function renderDiag() {
     if (diagState.manifest.note) L.push('  说明：' + diagState.manifest.note);
     if (diagState.manifest.error) L.push('  错误：' + diagState.manifest.error);
   }
+  L.push('');
+  L.push('【本地存储】');
+  if (diagState.rebuilt.length) {
+    diagState.rebuilt.forEach((s) => L.push('  ' + s));
+  }
+  if (diagState.storage) {
+    L.push('  状态：损坏（需要重建）');
+    L.push('  组：' + diagState.storage.groupId + '，库：' + (diagState.storage.storeName || '(未知)'));
+    L.push('  原始错误：' + diagState.storage.error);
+  } else {
+    L.push('  正常（未检测到本地存储错误）');
+  }
   if (diagState.errors.length) {
     L.push('');
     L.push('【异常】');
     diagState.errors.forEach((s) => L.push('  ' + s));
   }
   dom.diagBody.textContent = L.join('\n');
+  setStorageBanner(diagState.storage);
 }
 
 // 逐环取证：任何一步失败都单独记录原始错误，不影响其他步骤继续展示。
@@ -182,6 +242,7 @@ async function refreshDiag(detail) {
   diagState.repo = null;
   diagState.descriptors = null;
   diagState.instantiate = null;
+  diagState.storage = null;
   diagState.plan = {
     ok: appFsRemoteReady,
     prefix: MANIFEST_ROOT,
@@ -275,6 +336,11 @@ async function refreshDiag(detail) {
         entry.lines.push('原始错误：' + errText(e));
         const step = String((e && e.stack) || '').split('\n').slice(1, 3).join(' | ');
         if (step) entry.lines.push('出错环节：' + step);
+        // 本地存储损坏：单独标记并提供重建，不能混进“没有可用的数据同步组”。
+        if (isLocalStorageError(e)) {
+          entry.storageError = true;
+          if (!diagState.storage) diagState.storage = describeStorageFailure(e, g.id);
+        }
       }
       diagState.instantiate.items.push(entry);
     }
@@ -285,6 +351,9 @@ async function refreshDiag(detail) {
       diagState.instantiate.picked = picked ? (picked.id || '(无 id)') : null;
     } catch (e) {
       diagState.instantiate.error = 'pickRemoteDataGroup 失败：' + errText(e);
+      if (isLocalStorageError(e) && !diagState.storage) {
+        diagState.storage = describeStorageFailure(e, e.groupId || '(未知组)');
+      }
     }
     diagState.instantiate.items.push({
       id: '(选用)', ok: !!picked, lines: [picked ? '已选中数据组：' + (picked.id || '(无 id)') : '没有选中任何数据同步组（pickRemoteDataGroup 返回 null）'],
@@ -315,6 +384,9 @@ const dom = {
   btnUpload: $('btn-upload'),
   rsStatus: $('rs-status'),
   diagBody: $('diag-body'),
+  storageBanner: $('storage-banner'),
+  storageDetail: $('storage-banner-detail'),
+  btnRebuildStore: $('btn-rebuild-store'),
 
 
   btnLoadLocal: $('btn-load-local'),
@@ -1982,6 +2054,20 @@ async function ensureAppDataFs(detail) {
     updateSyncStatus();
     void refreshDiag(d);
   } catch (err) {
+    if (isLocalStorageError(err)) {
+      // 本地库损坏：明确提示 + 提供重建，绝不降级成“没有可用的数据同步组”。
+      const groupId = err.groupId || (diagState.storage && diagState.storage.groupId) || 'default';
+      diagState.storage = describeStorageFailure(err, groupId);
+      appFs = null;
+      appFsRemoteReady = false;
+      currentRemoteTypes = [];
+      MANIFEST_ROOT = '';
+      manifestBlockReason = '本地数据组存储损坏（需要重建）：' + groupId;
+      diagPushError('ensureAppDataFs', err);
+      renderDiag();
+      setRS('本地数据组存储已损坏（组 ' + groupId + '），需要重建：请按上方红色提示操作。', false);
+      return;
+    }
     setRS('同步组就绪但获取文件系统失败：' + err.message, false);
     diagPushError('ensureAppDataFs', err);
     renderDiag();
@@ -2338,12 +2424,83 @@ dom.btnLoadRemote.addEventListener('click', loadRemoteJSON);
   el.addEventListener('change', saveSettings);
 });
 
+// 一键重建本地数据组存储：先尽力同步一轮，再登记“下次启动前删库”，随后刷新。
+// 为什么刷新：损坏的组在 init 时已打开 IndexedDB 连接，同页 deleteDatabase 会一直 blocked；
+// 刷新后旧连接销毁，启动时在挂载组件之前删库才能真正完成。
+async function rebuildLocalStorage() {
+  const info = diagState.storage;
+  if (!info) {
+    setRS('当前没有检测到本地存储损坏。', false);
+    return;
+  }
+  const ok = window.confirm(
+    '将删除本地数据组「' + info.groupId + '」的 IndexedDB（' + (info.storeName || '(未知)') + '），'
+    + '然后刷新页面并从远端重新拉取。\n\n'
+    + '本地尚未同步的改动会丢失；远端数据不会被删除。\n\n继续？',
+  );
+  if (!ok) return;
+  const ZF = window.ZenFSConfigUI;
+  if (!ZF || typeof ZF.scheduleDataGroupStorageRebuild !== 'function') {
+    setRS('当前 vendor 版本不支持重建（缺少 scheduleDataGroupStorageRebuild），请先更新 vendor/zen-fs-config-ui.js。', false);
+    return;
+  }
+  let flushNote = '重建前未执行同步（数据组无法实例化）';
+  try {
+    const el = document.getElementById('zf-sync');
+    const conn = el && typeof el.getConnection === 'function' ? el.getConnection() : null;
+    if (conn && conn.repo && typeof ZF.flushDataGroupBeforeRebuild === 'function') {
+      const r = await ZF.flushDataGroupBeforeRebuild(conn.repo, info.groupId);
+      flushNote = r.ok ? '重建前已同步一轮' : ('重建前同步未完成：' + (r.error || '未知原因'));
+    }
+  } catch (e) {
+    flushNote = '重建前同步未完成：' + errText(e);
+  }
+  try {
+    ZF.scheduleDataGroupStorageRebuild(ZF_APP_ID, info.groupId);
+    try { localStorage.setItem('dsg:rebuild-flush-note', flushNote); } catch (_) { /* 忽略配额/隐私模式 */ }
+    diagState.rebuilt.push(flushNote);
+    setRS('已登记重建：正在刷新页面以删除本地库…', null);
+    location.reload();
+  } catch (e) {
+    setRS('登记重建失败：' + errText(e), false);
+  }
+}
+
 // 同步组配置组件（zen-fs-config-ui）：挂载 <sync-group-configurator>，连接后自动建立
 // app-data 数据组并拿到其 fs。监听「connected」事件；若组件已先连好（页面加载竞态），
 // 启动时再补查一次。
-(function wireSyncGroup() {
+(async function wireSyncGroup() {
+  const ZF = window.ZenFSConfigUI;
   const host = document.getElementById('zf-sync-host');
   if (!host) return;
+
+  // 1) 先执行上次登记的本地库删除：必须在任何组件连接、打开 IndexedDB 之前。
+  if (ZF && typeof ZF.runPendingDataGroupStorageRebuild === 'function') {
+    try {
+      const outcomes = await ZF.runPendingDataGroupStorageRebuild(ZF_APP_ID);
+      outcomes.forEach((o) => {
+        if (o.cleared) {
+          diagState.rebuilt.push('已重建：组 ' + o.groupId + '（已删除本地库 ' + o.storeName + '），将从远端重新拉取');
+        } else {
+          diagState.rebuilt.push('重建未完成：组 ' + o.groupId + '（' + (o.deletion.error || '库未删除') + '）');
+          diagPushError('重建 ' + o.groupId, o.deletion.error || '本地库未删除');
+        }
+      });
+      try {
+        const note = localStorage.getItem('dsg:rebuild-flush-note');
+        if (note) { diagState.rebuilt.push(note); localStorage.removeItem('dsg:rebuild-flush-note'); }
+      } catch (_) { /* 忽略 */ }
+      if (outcomes.length) renderDiag();
+    } catch (e) {
+      diagPushError('runPendingDataGroupStorageRebuild', e);
+      renderDiag();
+    }
+  }
+
+  if (dom.btnRebuildStore) {
+    dom.btnRebuildStore.addEventListener('click', () => { void rebuildLocalStorage(); });
+  }
+
   if (typeof customElements === 'undefined' || !customElements.get('sync-group-configurator')) {
     setRS('同步组组件未加载（vendor/zen-fs-config-ui.js 缺失或加载失败）。', false);
     updateSyncStatus();
@@ -2353,7 +2510,6 @@ dom.btnLoadRemote.addEventListener('click', loadRemoteJSON);
   // 两者各自的 UMD 全局均已随 vendor 脚本加载（ZenFSRemoteStorage / ZenFSGitee），无需反注册。
   // 仅 GitHub 未随包提供 UMD，且无使用场景，反注册以避免其工厂实例化时抛
   // “Backend package zen-fs-github is not available” 之类错误。
-  const ZF = window.ZenFSConfigUI;
   if (ZF && typeof ZF.unregisterBackend === 'function') {
     ZF.unregisterBackend('GitHub');
   }

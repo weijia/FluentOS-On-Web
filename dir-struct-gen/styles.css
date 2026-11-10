@@ -258,6 +258,19 @@ input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px;
 .rs-status { grid-column: 1 / -1; font-size: 12px; }
 .rs-status.ok { color: #1a7f37; }
 .rs-status.err { color: var(--danger); }
+/* 本地数据组存储损坏：必须显眼，不能降级成空结果 */
+.storage-banner {
+  grid-column: 1 / -1;
+  border: 1px solid var(--danger);
+  border-left-width: 4px;
+  border-radius: 6px;
+  background: rgba(220, 38, 38, 0.08);
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.storage-banner strong { color: var(--danger); }
+.storage-banner p { margin: 6px 0 8px; white-space: pre-wrap; word-break: break-all; }
 /* 同步组配置组件（<sync-group-configurator>）容器 */
 .rs-hint {
   grid-column: 1 / -1;

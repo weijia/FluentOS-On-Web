@@ -67,6 +67,11 @@
         Gitee 后端会在仓库内自动加 <code>app_data/folders/</code> 前缀，落点与 RemoteStorage 一致。
         按钮文案随实际后端类型动态显示。
       </p>
+      <div id="storage-banner" class="storage-banner" hidden>
+        <strong>本地数据组存储已损坏，需要重建</strong>
+        <p id="storage-banner-detail"></p>
+        <button id="btn-rebuild-store" class="btn btn-sm btn-primary">重建本地存储并从远端重新拉取</button>
+      </div>
       <div id="zf-sync-host" class="zf-sync-host"></div>
       <button id="btn-upload" class="btn btn-primary rs-upload" disabled>上传到数据同步组</button>
       <span id="rs-status" class="rs-status"></span>

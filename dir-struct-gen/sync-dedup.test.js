@@ -13,6 +13,31 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const SD = require('./sync-dedup.js');
 
+test('pickRemoteDataGroup：本地存储损坏不再静默返回 null', async () => {
+  const storageErr = Object.assign(new Error('Failed to create local primary'), {
+    code: 'LOCAL_STORAGE_UNAVAILABLE',
+    groupId: 'default',
+  });
+  const repo = {
+    getBackends: async () => ({ backends: [] }),
+    listAppDataGroups: async () => [{ id: 'default' }],
+    getAppDataGroup: async () => { throw storageErr; },
+  };
+  await assert.rejects(
+    () => SD.pickRemoteDataGroup(repo),
+    (err) => err.code === 'LOCAL_STORAGE_UNAVAILABLE' && err.groupId === 'default',
+  );
+});
+
+test('pickRemoteDataGroup：普通实例化失败仍保持“无可用组”（不误报损坏）', async () => {
+  const repo = {
+    getBackends: async () => ({ backends: [] }),
+    listAppDataGroups: async () => [{ id: 'g1' }],
+    getAppDataGroup: async () => { throw new Error('descriptor missing'); },
+  };
+  assert.equal(await SD.pickRemoteDataGroup(repo), null);
+});
+
 test('Gitee baseUrl 空串与默认端点折叠为同一条（核心回归）', () => {
   const a = SD.backendDedupKey('Gitee', { owner: 'u', repo: 'r', branch: 'master', baseUrl: '' });
   const b = SD.backendDedupKey('Gitee', { owner: 'u', repo: 'r', branch: 'master', baseUrl: 'https://gitee.com/api/v5' });

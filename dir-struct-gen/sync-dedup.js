@@ -27,6 +27,16 @@
     WebDAV: ['baseUrl'],
   };
 
+  // 本地数据组存储不可用（IndexedDB 记录丢失 / EIO）：穿透 cause 链识别。
+  function isLocalStorageError(err) {
+    var cur = err;
+    for (var i = 0; cur && i < 6; i++) {
+      if (cur.code === 'LOCAL_STORAGE_UNAVAILABLE' || cur.name === 'NotReadableError' || cur.code === 'EIO') return true;
+      cur = cur.cause;
+    }
+    return false;
+  }
+
   // 归一化 baseUrl：空串/未设置 → 默认端点；去掉尾部斜杠（"" 与默认、与带斜杠的同一端点折叠）。
   function normalizeBaseUrl(type, baseUrl) {
     var dflt = type === 'Gitee' ? GITEE_DEFAULT : type === 'GitHub' ? GITHUB_DEFAULT : null;
@@ -184,6 +194,8 @@
   // repo 需提供 listAppDataGroups()、getAppDataGroup(id)、getBackends()。
   async function pickRemoteDataGroup(repo) {
     if (!repo || typeof repo.listAppDataGroups !== 'function') return null;
+    var failures = [];
+    var storageFailure = null;
     try {
       // 配置仓库自身的远端后端身份键集合（用于判断数据组是否“同仓库”）。
       var cfgKeys = {};
@@ -200,7 +212,14 @@
       for (var j = 0; j < groups.length; j++) {
         var g = groups[j];
         var dg = g;
-        try { dg = await repo.getAppDataGroup(g.id); } catch (_) { continue; }
+        try {
+          dg = await repo.getAppDataGroup(g.id);
+        } catch (err) {
+          // 不能再 `continue` 静默跳过：本地库损坏会让“有组”被误报成“没有可用组”。
+          failures.push(g.id + '：' + ((err && (err.message || err.name)) || String(err)));
+          if (isLocalStorageError(err) && !storageFailure) storageFailure = { groupId: g.id, error: err };
+          continue;
+        }
         var bs = declaredBackends(dg);
         var remote = bs.filter(function (b) { return b && !LOCAL_BACKEND_TYPES[b.type]; });
         if (remote.length === 0) continue;
@@ -208,7 +227,19 @@
         var hasDistinct = remote.some(function (b) { return !cfgKeys[backendDedupKey(b.type, b.options)]; });
         if (hasDistinct) return dg;
       }
-    } catch (_) { /* 无法枚举时静默，保持上传不可用 */ }
+    } catch (err) {
+      if (isLocalStorageError(err)) throw err;
+      /* 无法枚举时保持上传不可用，但实例化失败的原因已在 failures 里 */
+    }
+    if (storageFailure) {
+      var message = '本地数据组存储不可用（组 ' + storageFailure.groupId + ' 无法实例化）：'
+        + ((storageFailure.error && (storageFailure.error.message || storageFailure.error.name)) || 'IndexedDB 记录不可读');
+      var typed = new Error(message);
+      typed.code = 'LOCAL_STORAGE_UNAVAILABLE';
+      typed.groupId = storageFailure.groupId;
+      typed.failures = failures;
+      throw typed;
+    }
     return null;
   }
 

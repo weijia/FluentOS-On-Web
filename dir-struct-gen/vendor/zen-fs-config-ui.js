@@ -24269,9 +24269,14 @@ var ZenFSConfigUI = (() => {
   // src/browser.ts
   var browser_exports = {};
   __export(browser_exports, {
+    LOCAL_STORAGE_UNAVAILABLE_MESSAGE: () => LOCAL_STORAGE_UNAVAILABLE_MESSAGE,
+    describeDataGroupError: () => describeDataGroupError,
     deserializeBackend: () => deserializeBackend,
+    flushDataGroupBeforeRebuild: () => flushDataGroupBeforeRebuild,
     listBackendMetadata: () => listBackendMetadata,
     registerBackend: () => registerBackend,
+    runPendingDataGroupStorageRebuild: () => runPendingDataGroupStorageRebuild,
+    scheduleDataGroupStorageRebuild: () => scheduleDataGroupStorageRebuild,
     serializeBackend: () => serializeBackend,
     wrapZenFSFileSystem: () => wrapZenFSFileSystem2
   });
@@ -25900,6 +25905,123 @@ var ZenFSConfigUI = (() => {
       return pathMod.join(kindDir, groupId);
     }
     return kindDir;
+  }
+  var LOCAL_STORAGE_UNAVAILABLE = "LOCAL_STORAGE_UNAVAILABLE";
+  function dataGroupLocalStoreName(appId, groupId) {
+    return groupId === "default" ? `zen-fs-config-data-${appId}` : `zen-fs-config-data-${appId}-${groupId}`;
+  }
+  var LocalStorageUnavailableError = class extends Error {
+    constructor(details) {
+      super(
+        `Local storage for data group "${details.groupId}" is unavailable (IndexedDB "${details.storeName}"): ${describeError(details.cause)}`
+      );
+      __publicField(this, "code", LOCAL_STORAGE_UNAVAILABLE);
+      __publicField(this, "appId");
+      __publicField(this, "groupId");
+      __publicField(this, "storeName");
+      __publicField(this, "cause");
+      this.name = "LocalStorageUnavailableError";
+      this.appId = details.appId;
+      this.groupId = details.groupId;
+      this.storeName = details.storeName;
+      this.cause = details.cause;
+    }
+    /** 原始异常的可序列化摘要（code / name / message），便于日志与诊断面板展示。 */
+    toJSON() {
+      return {
+        name: this.name,
+        code: this.code,
+        appId: this.appId,
+        groupId: this.groupId,
+        storeName: this.storeName,
+        message: this.message,
+        cause: summarizeError(this.cause)
+      };
+    }
+  };
+  function summarizeError(err2) {
+    if (err2 instanceof Error || err2 && typeof err2 === "object") {
+      const anyErr = err2;
+      return {
+        name: anyErr.name,
+        code: anyErr.code,
+        message: anyErr.message ?? String(err2),
+        stack: anyErr.stack
+      };
+    }
+    return { message: String(err2) };
+  }
+  function describeError(err2) {
+    const s = summarizeError(err2);
+    return [s.name, s.code, s.message].filter(Boolean).join(": ");
+  }
+  var STORAGE_MESSAGE_HINTS = [
+    /Data lost due to missing file/i,
+    /should be considered irrecoverable/i,
+    /IndexedDB.*(corrupt|unreadable)/i
+  ];
+  function isLocalStorageUnavailableError(err2) {
+    let cur = err2;
+    for (let depth = 0; cur && depth < 6; depth++) {
+      if (cur instanceof LocalStorageUnavailableError) return true;
+      const anyErr = cur;
+      if (anyErr.name === "NotReadableError") return true;
+      if (anyErr.code === "EIO") return true;
+      const message = typeof anyErr.message === "string" ? anyErr.message : "";
+      if (message && STORAGE_MESSAGE_HINTS.some((re) => re.test(message))) return true;
+      cur = anyErr.cause;
+    }
+    return false;
+  }
+  function deleteDataGroupLocalStore(appId, groupId, options = {}) {
+    const storeName = dataGroupLocalStoreName(appId, groupId);
+    const idb = globalThis.indexedDB;
+    if (!idb || typeof idb.deleteDatabase !== "function") {
+      return Promise.resolve({
+        storeName,
+        deleted: false,
+        blocked: false,
+        unsupported: true,
+        error: "\u5F53\u524D\u73AF\u5883\u6CA1\u6709 IndexedDB\uFF1A\u65E0\u6CD5\u5220\u9664\u672C\u5730\u6570\u636E\u7EC4\u5B58\u50A8"
+      });
+    }
+    const timeoutMs = options.timeoutMs ?? 4e3;
+    return new Promise((resolve4) => {
+      let settled = false;
+      let blocked = false;
+      let timer;
+      const finish2 = (result) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        resolve4(result);
+      };
+      let request2;
+      try {
+        request2 = idb.deleteDatabase(storeName);
+      } catch (err2) {
+        finish2({ storeName, deleted: false, blocked: false, error: summarizeError(err2).message });
+        return;
+      }
+      request2.onsuccess = () => finish2({ storeName, deleted: true, blocked: false });
+      request2.onerror = () => finish2({
+        storeName,
+        deleted: false,
+        blocked: false,
+        error: summarizeError(request2.error).message
+      });
+      request2.onblocked = () => {
+        blocked = true;
+      };
+      timer = setTimeout(() => {
+        finish2({
+          storeName,
+          deleted: false,
+          blocked,
+          error: blocked ? "\u5220\u9664\u88AB\u5176\u5B83\u9875\u9762/\u5B9E\u4F8B\u5360\u7528\uFF08blocked\uFF09\uFF1A\u8BF7\u5173\u95ED\u5176\u5B83\u6253\u5F00\u8BE5\u9875\u9762\u7684\u6807\u7B7E\u9875\u540E\u91CD\u8BD5" : "\u5220\u9664\u8D85\u65F6\uFF1AIndexedDB \u672A\u5728\u9884\u671F\u65F6\u95F4\u5185\u54CD\u5E94"
+        });
+      }, timeoutMs);
+    });
   }
   function versionPathFor(configFilePath) {
     const lastSlash = configFilePath.lastIndexOf("/");
@@ -29288,14 +29410,28 @@ var ZenFSConfigUI = (() => {
       });
     }
     async init() {
+      const storeName = dataGroupLocalStoreName(this.appId, this.groupId);
       try {
         const localPrimary = await resolveLocalPrimary(this.appId, "data", {
           groupId: this.groupId,
-          ...this.groupId === "default" ? {} : { idbStoreName: `zen-fs-config-data-${this.appId}-${this.groupId}` }
+          ...this.groupId === "default" ? {} : { idbStoreName: storeName }
         });
         this.localFS = await createBackend(localPrimary);
-      } catch {
-        throw new Error(`Failed to create local primary for data group "${this.groupId}"`);
+      } catch (err2) {
+        if (isLocalStorageUnavailableError(err2)) {
+          throw new LocalStorageUnavailableError({
+            appId: this.appId,
+            groupId: this.groupId,
+            storeName,
+            cause: err2
+          });
+        }
+        const detail = summarizeError(err2);
+        const wrapped = new Error(
+          `Failed to create local primary for data group "${this.groupId}" (${[detail.name, detail.code, detail.message].filter(Boolean).join(": ")})`,
+          { cause: err2 }
+        );
+        throw wrapped;
       }
       try {
         const purged = await purgeMtimeSidecars(this.localFS);
@@ -30169,6 +30305,89 @@ var ZenFSConfigUI = (() => {
     const declared = typeof dataGroup.listDeclaredBackends === "function" ? dataGroup.listDeclaredBackends() : null;
     return declared && declared.length > 0 ? declared : dataGroup.listBackends();
   }
+  var LOCAL_STORAGE_UNAVAILABLE_MESSAGE = "\u672C\u5730\u6570\u636E\u7EC4\u5B58\u50A8\u5DF2\u635F\u574F\uFF0C\u9700\u8981\u91CD\u5EFA\uFF1A\u8BE5\u7EC4\u7684\u6D4F\u89C8\u5668 IndexedDB \u8BB0\u5F55\u4E0D\u53EF\u8BFB\u3002\u91CD\u5EFA\u4F1A\u5220\u9664\u672C\u5730\u672A\u540C\u6B65\u7684\u6539\u52A8\uFF08\u8FDC\u7AEF\u6570\u636E\u4E0D\u53D7\u5F71\u54CD\uFF09\uFF0C\u5E76\u4ECE\u8FDC\u7AEF\u91CD\u65B0\u62C9\u53D6\u3002";
+  function describeDataGroupError(err2, appId, groupId) {
+    if (isLocalStorageUnavailableError(err2)) {
+      return {
+        kind: "local-storage-unavailable",
+        message: LOCAL_STORAGE_UNAVAILABLE_MESSAGE + "\n\u539F\u59CB\u9519\u8BEF\uFF1A" + errorText(err2),
+        storeName: dataGroupLocalStoreName(appId, groupId)
+      };
+    }
+    return { kind: "other", message: errorText(err2) };
+  }
+  function errorText(err2) {
+    if (err2 && typeof err2 === "object") {
+      const e = err2;
+      const head = [e.name, e.code, e.message].filter(Boolean).join(": ") || String(err2);
+      return e.cause ? head + " \u2190 " + errorText(e.cause) : head;
+    }
+    return String(err2);
+  }
+  async function flushDataGroupBeforeRebuild(repo, groupId) {
+    const result = { attempted: true, ok: false, error: null };
+    try {
+      const dg = await repo.getAppDataGroup(groupId);
+      const syncNow = dg.syncNow;
+      if (typeof syncNow !== "function") {
+        result.error = "\u8BE5\u6570\u636E\u7EC4\u6CA1\u6709 syncNow()\uFF0C\u8DF3\u8FC7\u91CD\u5EFA\u524D\u540C\u6B65";
+        return result;
+      }
+      await syncNow.call(dg);
+      result.ok = true;
+    } catch (err2) {
+      result.error = errorText(err2);
+    }
+    return result;
+  }
+  var REBUILD_MARKER_PREFIX = "zen-fs-config:rebuild-data-store:";
+  function scheduleDataGroupStorageRebuild(appId, groupId) {
+    const pending = {
+      groupId,
+      storeName: dataGroupLocalStoreName(appId, groupId),
+      requestedAt: Date.now()
+    };
+    const storage = safeLocalStorage();
+    if (!storage) throw new Error("\u5F53\u524D\u73AF\u5883\u6CA1\u6709 localStorage\uFF1A\u65E0\u6CD5\u767B\u8BB0\u672C\u5730\u5B58\u50A8\u91CD\u5EFA");
+    storage.setItem(REBUILD_MARKER_PREFIX + appId + ":" + groupId, JSON.stringify(pending));
+    return pending;
+  }
+  async function runPendingDataGroupStorageRebuild(appId, options = {}) {
+    const storage = safeLocalStorage();
+    if (!storage) return [];
+    const prefix = REBUILD_MARKER_PREFIX + appId + ":";
+    const keys = [];
+    for (let i = 0; i < storage.length; i++) {
+      const key = storage.key(i);
+      if (key && key.startsWith(prefix)) keys.push(key);
+    }
+    const outcomes = [];
+    for (const key of keys) {
+      let pending;
+      try {
+        pending = JSON.parse(storage.getItem(key) || "{}");
+      } catch {
+        storage.removeItem(key);
+        continue;
+      }
+      if (!pending.groupId) {
+        storage.removeItem(key);
+        continue;
+      }
+      const deletion = await deleteDataGroupLocalStore(appId, pending.groupId, options);
+      const cleared = deletion.deleted;
+      if (cleared) storage.removeItem(key);
+      outcomes.push({ ...pending, deletion, cleared });
+    }
+    return outcomes;
+  }
+  function safeLocalStorage() {
+    try {
+      return typeof localStorage !== "undefined" ? localStorage : null;
+    } catch {
+      return null;
+    }
+  }
 
   // src/core/group-name.ts
   var GROUP_NAME_MAX_LENGTH2 = 40;
@@ -30790,7 +31009,7 @@ var ZenFSConfigUI = (() => {
     }
     // ── Version logging ──────────────────────────────────────────────────
     logVersion() {
-      const uiVersion = true ? "0.3.24" : "dev";
+      const uiVersion = true ? "0.3.25" : "dev";
       console.log(
         `%c[zen-fs-config-ui] v${uiVersion}%c (appId=${this.props.appId})`,
         "color:#2563eb;font-weight:bold",
