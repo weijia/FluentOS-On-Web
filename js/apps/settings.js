@@ -11,6 +11,9 @@ const SettingsApp = {
     _developerModeVisible: false,
     // 与当前仓库 git log 同步；同一天的提交共同组成一个日期版本。
     aboutChangelog: [
+        { date: '2026-11-10', version: '2.6.261110', commits: [
+            { hash: 'local', title: '修复文件浏览器无法显示目录树：目录清单改为扫描 <base>/struct/ 并合并 v2 主机索引与卷分片（兼容旧版 v1 清单）；清单缺失、格式不识别或请求失败时显示具体原因与路径，不再静默显示空目录。' }
+        ] },
         { date: '2026-10-28', version: '2.6.261028', commits: [
             { hash: 'local', title: '修复点击侧边栏「远程存储」后仍显示桌面：远程节点路径解析入口未默认从远程树根开始；导航进入远程节点时自动触发懒加载。' },
             { hash: 'local', title: '文件管理器侧边栏新增「远程存储」快捷入口，点击直接进入远程挂载根节点浏览目录树。' },

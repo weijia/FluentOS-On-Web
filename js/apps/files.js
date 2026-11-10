@@ -1558,7 +1558,7 @@ const FilesApp = {
 
     renderFileIconHTML(node) {
         if (this.isRemoteNode && this.isRemoteNode(node)) {
-            const icon = (node.type === 'remotestorage-dir' || node.type === 'remotestorage-manifest')
+            const icon = (node.type === 'remotestorage-dir')
                 ? 'Theme/Icon/Symbol_icon/stroke/Folder.svg'
                 : 'Theme/Icon/Symbol_icon/stroke/Cloud.svg';
             return `<img src="${icon}" alt="${node.name}" draggable="false">`;
@@ -1645,8 +1645,33 @@ const FilesApp = {
             return;
         }
 
+        // 部分清单读取失败时给出可见提示（不再静默降级成空目录）
+        const appendWarnings = () => {
+            const warnings = Array.isArray(this.currentNode._warnings) ? this.currentNode._warnings : [];
+            if (!warnings.length) return;
+            const box = document.createElement('div');
+            box.className = 'remote-state remote-warning';
+            box.style.cssText = 'grid-column:1/-1;padding:12px 16px;border-radius:8px;background:rgba(255,196,0,.12);color:var(--text-secondary);font-size:12px;line-height:1.6;';
+            const title = document.createElement('div');
+            title.style.fontWeight = '600';
+            title.style.marginBottom = '4px';
+            title.textContent = t('files.remote-manifest-warning');
+            box.appendChild(title);
+            for (const w of warnings) {
+                const line = document.createElement('div');
+                line.textContent = '• ' + w;
+                box.appendChild(line);
+            }
+            filesList.appendChild(box);
+        };
+
         if (!this.currentNode.children || this.currentNode.children.length === 0) {
-            filesList.innerHTML = `<div style="grid-column: 1/-1; text-align: center; color: var(--text-tertiary); padding: 48px;">${t('files.empty-folder')}</div>`;
+            filesList.innerHTML = '';
+            appendWarnings();
+            const empty = document.createElement('div');
+            empty.style.cssText = 'grid-column: 1/-1; text-align: center; color: var(--text-tertiary); padding: 48px;';
+            empty.textContent = t('files.empty-folder');
+            filesList.appendChild(empty);
             this.updateStatus(0);
             return;
         }
@@ -1692,6 +1717,7 @@ const FilesApp = {
             displayChildren = children;
         }
 
+        appendWarnings();
         displayChildren.forEach(node => {
             const item = document.createElement('div');
             item.className = 'file-item' + (this.isRemoteNode(node) ? ' remote-item' : '');
@@ -1927,6 +1953,7 @@ const FilesApp = {
             children: []
         };
         for (const conn of conns) {
+            const basePath = (conn.basePath && String(conn.basePath).trim()) ? conn.basePath : '/app_data/folders/';
             const connNode = {
                 id: 'rs-' + conn.id,
                 type: 'remotestorage-conn',
@@ -1942,21 +1969,21 @@ const FilesApp = {
                 name: t('files.remote-live'),
                 connectionId: conn.id,
                 path: (typeof RemoteStorageClient !== 'undefined' && RemoteStorageClient.normalizeHref)
-                    ? RemoteStorageClient.normalizeHref(conn.basePath || '/')
-                    : (conn.basePath || '/'),
+                    ? RemoteStorageClient.normalizeHref(basePath)
+                    : basePath,
                 _loaded: false, _loading: false, _error: null, children: []
             });
-            // 目录清单：容器节点。manifestFile 指定则只挂该文件；否则展开时自动扫描 basePath 下所有 .json。
+            // 目录清单：容器节点。展开时扫描 <base>/struct/（v2 主机索引 + 卷分片），并兼容 <base>/ 下的 v1 清单。
             connNode.children.push({
                 id: connNode.id + '-manifests',
                 type: 'remotestorage-manifests',
                 name: t('files.remote-manifest'),
                 connectionId: conn.id,
                 path: (typeof RemoteStorageClient !== 'undefined' && RemoteStorageClient.normalizeHref)
-                    ? RemoteStorageClient.normalizeHref(conn.basePath || '/')
-                    : (conn.basePath || '/'),
+                    ? RemoteStorageClient.normalizeHref(basePath)
+                    : basePath,
                 manifestFile: conn.manifestFile || '',
-                _loaded: false, _loading: false, _error: null, children: []
+                _loaded: false, _loading: false, _error: null, _warnings: [], children: []
             });
             root.children.push(connNode);
         }
@@ -2013,22 +2040,14 @@ const FilesApp = {
                 if (old._loaded) {
                     newNode._loaded = true;
                     if (Array.isArray(old.children)) newNode.children = old.children;
-                    if (old._manifestRoot) newNode._manifestRoot = old._manifestRoot;
                     if (old._manifestChildren) newNode._manifestChildren = old._manifestChildren;
+                    if (Array.isArray(old._warnings)) newNode._warnings = old._warnings;
                 }
             }
         }
         if (preserve && Array.isArray(newNode.children)) {
             for (const c of newNode.children) this._mergeRemoteState(c, oldTree);
         }
-    },
-
-    // 从路径/文件名取一个友好的清单显示名（去目录前缀与 .json 后缀）。
-    _manifestDisplayName(pathOrName) {
-        let n = String(pathOrName || '');
-        n = n.split('/').pop();
-        if (/\.json$/i.test(n)) n = n.replace(/\.json$/i, '');
-        return n || 'manifest';
     },
 
     _findInRemoteTree(node, id) {
@@ -2126,37 +2145,24 @@ const FilesApp = {
                     _loaded: false, _loading: false, _error: null, children: []
                 }));
             } else if (node.type === 'remotestorage-manifests') {
-                // 指定了单个清单文件 → 只挂该文件；否则自动扫描 basePath 下所有 .json
-                if (node.manifestFile && String(node.manifestFile).trim()) {
-                    node.children = [{
-                        id: node.id + '/' + node.manifestFile,
-                        type: 'remotestorage-manifest',
-                        name: this._manifestDisplayName(node.manifestFile),
-                        connectionId: node.connectionId,
-                        manifestFile: node.manifestFile,
-                        _loaded: false, _loading: false, _error: null, children: []
-                    }];
-                } else {
-                    const files = await RemoteStorageClient.listFiles({
-                        href: conn.href, token: conn.token, path: node.path, ext: '.json'
-                    });
-                    node.children = files.map((f) => ({
-                        id: node.id + '/' + f.name,
-                        type: 'remotestorage-manifest',
-                        name: this._manifestDisplayName(f.name),
-                        connectionId: node.connectionId,
-                        manifestFile: f.path,
-                        _loaded: false, _loading: false, _error: null, children: []
-                    }));
-                }
-            } else if (node.type === 'remotestorage-manifest') {
-                const res = await RemoteStorageClient.fetchManifest({
-                    href: conn.href, token: conn.token, manifestFile: node.manifestFile
+                // 读取 <base>/struct/ 下的 v2 清单（主机索引 + 卷分片），兼容 <base>/ 下的 v1 清单。
+                // 每个目录源（主机 / 旧版清单 / 未索引卷）挂成一个文件夹，展开时直接用内存中的树。
+                const res = await RemoteStorageClient.fetchManifestCollection({
+                    href: conn.href,
+                    token: conn.token,
+                    basePath: node.path || conn.basePath || '/app_data/folders/',
+                    manifestFile: node.manifestFile || ''
                 });
-                node._manifestRoot = res.root;
-                node.children = (res.root.children || [])
-                    .filter((c) => c.type === 'folder' || c.type === undefined)
-                    .map((m) => this._manifestChildToNode(node, m));
+                node._warnings = Array.isArray(res.warnings) ? res.warnings : [];
+                node.children = res.sources.map((src, i) => ({
+                    id: node.id + '/' + (src.key || ('src-' + i)),
+                    type: 'remotestorage-dir',
+                    name: src.name,
+                    connectionId: node.connectionId,
+                    _source: 'manifest',
+                    _manifestChildren: (src.root && src.root.children) || [],
+                    _loaded: false, _loading: false, _error: null, children: []
+                }));
             }
             node._loaded = true; node._error = null; node._loading = false;
         } catch (err) {

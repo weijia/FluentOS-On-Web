@@ -477,6 +477,7 @@ const I18n = {
             'files.remote-load-fail': '加载失败',
             'files.remote-no-conn': '找不到对应的连接配置',
             'files.remote-readonly': '远程目录为只读，无法修改',
+            'files.remote-manifest-warning': '部分清单未能读取',
 
             // 设置 - Remote Storage 连接管理
             'settings.remote-storage': '远程存储',
@@ -1609,6 +1610,7 @@ const I18n = {
             'files.remote-load-fail': 'Failed to load',
             'files.remote-no-conn': 'Connection configuration not found',
             'files.remote-readonly': 'Remote folders are read-only',
+            'files.remote-manifest-warning': 'Some manifests could not be read',
 
             // Settings - Remote Storage connection management
             'settings.remote-storage': 'Remote Storage',
