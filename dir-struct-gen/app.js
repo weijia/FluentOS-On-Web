@@ -65,6 +65,236 @@ function applyManifestPlan(group) {
   MANIFEST_ROOT = plan.ok ? plan.prefix : '';
   manifestBlockReason = plan.reason || '';
 }
+/* ---------------- 链路诊断（常驻面板） ----------------
+ * 目标：配置仓 → 描述符 → 组实例化 → 每个后端 → 清单生成 → 清单落地，
+ * 每一环的真实状态都直接显示；任何异常（包括被上层 catch 掉的）都写进面板，
+ * 禁止静默降级成“空结果 / 空目录”。token 等敏感值统一遮罩。
+ */
+const diagState = {
+  stage: '等待同步组连接',
+  repo: null,
+  descriptors: null,
+  instantiate: null,
+  plan: null,
+  manifest: null,
+  errors: [],
+};
+
+function maskSecrets(value) {
+  if (typeof value === 'string') {
+    return value
+      .replace(/((?:access_token|token|secret|password|authorization)=)([^&\s"']+)/gi, '$1***')
+      .replace(/(\/\/[^/\s@]+:)[^/\s@]+@/g, '$1***@');
+  }
+  if (Array.isArray(value)) return value.map(maskSecrets);
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const k of Object.keys(value)) {
+      out[k] = /^(token|accessToken|secret|password|authorization)$/i.test(k) ? '***' : maskSecrets(value[k]);
+    }
+    return out;
+  }
+  return value;
+}
+
+function errText(err) {
+  return maskSecrets((err && (err.stack || err.message)) || String(err));
+}
+
+function diagPushError(label, err) {
+  diagState.errors.push(label + '：' + errText(err));
+  if (diagState.errors.length > 20) diagState.errors.shift();
+}
+
+function renderDiag() {
+  if (!dom.diagBody) return;
+  const L = [];
+  L.push('更新时间：' + new Date().toLocaleString('zh-CN'));
+  L.push('阶段：' + diagState.stage);
+  L.push('');
+  L.push('【配置仓】');
+  if (!diagState.repo) {
+    L.push('  尚未连接（getConnection() 无结果）');
+  } else {
+    L.push('  连接：' + (diagState.repo.connected ? '已连接' : '未连接') + '，类型=' + diagState.repo.groupType);
+    L.push('  后端数量：' + (diagState.repo.backendCount == null ? '未知' : diagState.repo.backendCount));
+    (diagState.repo.backends || []).forEach((s) => L.push('   - ' + s));
+    if (diagState.repo.note) L.push('  注：' + diagState.repo.note);
+    if (diagState.repo.error) L.push('  错误：' + diagState.repo.error);
+  }
+  L.push('');
+  L.push('【数据组描述符】');
+  if (!diagState.descriptors) {
+    L.push('  未读取');
+  } else {
+    L.push('  listAppDataGroups()：' + diagState.descriptors.count + ' 条');
+    (diagState.descriptors.items || []).forEach((s) => L.push('   - ' + s));
+    (diagState.descriptors.raw || []).forEach((s) => L.push('  ' + s));
+    if (diagState.descriptors.error) L.push('  错误：' + diagState.descriptors.error);
+  }
+  L.push('');
+  L.push('【组实例化】');
+  if (!diagState.instantiate) {
+    L.push('  未执行');
+  } else {
+    (diagState.instantiate.items || []).forEach((it) => {
+      L.push('  组 ' + it.id + '：' + (it.ok ? '成功' : '失败'));
+      (it.lines || []).forEach((s) => L.push('     ' + s));
+    });
+    if (diagState.instantiate.error) L.push('  错误：' + diagState.instantiate.error);
+  }
+  L.push('');
+  L.push('【清单落点计划】');
+  if (!diagState.plan) L.push('  未计算');
+  else {
+    L.push('  可用：' + (diagState.plan.ok ? '是' : '否'));
+    L.push('  前缀：' + (diagState.plan.prefix === '' ? '(空) ' : String(diagState.plan.prefix)));
+    L.push('  远端类型：' + ((diagState.plan.types || []).join(' / ') || '(无)'));
+    if (diagState.plan.reason) L.push('  中止原因：' + diagState.plan.reason);
+  }
+  L.push('');
+  L.push('【清单生成 / 落地】');
+  if (!diagState.manifest) L.push('  未执行');
+  else {
+    L.push('  生成：' + (diagState.manifest.generated ? '已执行' : '未执行'));
+    if (diagState.manifest.dir) L.push('  目标目录：' + diagState.manifest.dir);
+    if (diagState.manifest.hostIndex) L.push('  主机索引：' + diagState.manifest.hostIndex);
+    if (diagState.manifest.volumes != null) L.push('  卷分片数：' + diagState.manifest.volumes);
+    if (diagState.manifest.changed != null) L.push('  与上次相比：' + (diagState.manifest.changed ? '有变化（写入）' : '无变化（跳过）'));
+    if (diagState.manifest.written != null) L.push('  已写入：' + (diagState.manifest.written ? '是' : '否'));
+    if (diagState.manifest.note) L.push('  说明：' + diagState.manifest.note);
+    if (diagState.manifest.error) L.push('  错误：' + diagState.manifest.error);
+  }
+  if (diagState.errors.length) {
+    L.push('');
+    L.push('【异常】');
+    diagState.errors.forEach((s) => L.push('  ' + s));
+  }
+  dom.diagBody.textContent = L.join('\n');
+}
+
+// 逐环取证：任何一步失败都单独记录原始错误，不影响其他步骤继续展示。
+async function refreshDiag(detail) {
+  const d = detail || (typeof document !== 'undefined'
+    ? document.getElementById('zf-sync') && document.getElementById('zf-sync').getConnection()
+    : null);
+  diagState.stage = '收集中…';
+  diagState.repo = null;
+  diagState.descriptors = null;
+  diagState.instantiate = null;
+  diagState.plan = {
+    ok: appFsRemoteReady,
+    prefix: MANIFEST_ROOT,
+    types: currentRemoteTypes.slice(),
+    reason: manifestBlockReason,
+  };
+  try {
+    if (!d) {
+      diagState.stage = '未连接同步组';
+      return;
+    }
+    diagState.repo = { connected: true, groupType: d.groupType || '(none)', backendCount: null, backends: [] };
+    if (!d.repo) {
+      diagState.repo.error = '连接结果里没有 repo（组件未提供配置仓）';
+      return;
+    }
+    try {
+      const raw = await d.repo.getBackends();
+      const list = raw && typeof raw === 'object'
+        ? (Array.isArray(raw) ? raw : (raw.backends || Object.values(raw)))
+        : [];
+      diagState.repo.backendCount = Array.isArray(list) ? list.length : 0;
+      diagState.repo.backends = (Array.isArray(list) ? list : []).map((b) => {
+        const m = maskSecrets(b) || {};
+        return (m.id || m.type || '?') + '（' + (m.type || '?') + '）已注册'
+          + (m.options ? ' options=' + JSON.stringify(m.options) : '');
+      });
+      diagState.repo.note = '配置仓 API 未暴露每后端连接状态；数据组侧连接视图见【组实例化】的“已连后端”。';
+    } catch (e) {
+      diagState.repo.error = 'getBackends 失败：' + errText(e);
+    }
+
+    let groups = [];
+    try {
+      groups = await d.repo.listAppDataGroups();
+      diagState.descriptors = { count: groups.length, items: [], raw: [] };
+      groups.forEach((g) => {
+        diagState.descriptors.items.push(
+          g.id + ' → ' + ((g.backends || []).map((b) => (b.id || '?') + ':' + (b.type || '?')).join(', ') || '(无后端)')
+        );
+      });
+    } catch (e) {
+      diagState.descriptors = { count: 0, items: [], raw: [], error: 'listAppDataGroups 失败：' + errText(e) };
+      groups = [];
+    }
+
+    // 直接读描述符原文，区分「.config 引导副本」与「组内 .meta 镜像」。
+    // repo.fs 在某些版本是受限 chroot，根不可枚举；此时明确说明，而不是伪装成“为空”。
+    if (diagState.descriptors && d.repo.fs && d.repo.fs.promises) {
+      const fp = d.repo.fs.promises;
+      let rootOk = false;
+      try {
+        await fp.readdir('/');
+        rootOk = true;
+      } catch (e) {
+        diagState.descriptors.raw.push('描述符原文：不可读（' + errText(e).split('\n')[0] + '），下列内容来自 listAppDataGroups()');
+      }
+      if (rootOk) {
+        const candidates = [
+          '.config/app-data-groups/' + ZF_APP_ID + '/default.json',
+          '.meta/app-data-groups/' + ZF_APP_ID + '/default.json',
+          '.config/app-data-groups/default.json',
+          '.meta/app-data-groups/default.json',
+        ];
+        for (const p of candidates) {
+          try {
+            const txt = await fp.readFile(p, 'utf8');
+            diagState.descriptors.raw.push(p + '：' + maskSecrets(String(txt)).replace(/\s+/g, ' ').slice(0, 400));
+          } catch (e) {
+            diagState.descriptors.raw.push(p + '：（不存在）');
+          }
+        }
+      }
+    }
+
+    diagState.instantiate = { items: [] };
+    for (const g of groups) {
+      const entry = { id: g.id, ok: false, lines: [] };
+      try {
+        const dg = await d.repo.getAppDataGroup(g.id);
+        entry.ok = true;
+        const declared = (dg.listDeclaredBackends ? dg.listDeclaredBackends() : []).map((b) => ({
+          id: b.id, type: b.type, status: b.status || null,
+        }));
+        const live = (typeof dg.listBackends === 'function' ? dg.listBackends() : []).map((b) => ({
+          type: b.type, status: b.status || null,
+        }));
+        entry.lines.push('声明后端（组内 .meta/backends）：' + (JSON.stringify(maskSecrets(declared)) || '[]'));
+        entry.lines.push('已连后端：' + (JSON.stringify(maskSecrets(live)) || '[]'));
+      } catch (e) {
+        entry.lines.push('原始错误：' + errText(e));
+        const step = String((e && e.stack) || '').split('\n').slice(1, 3).join(' | ');
+        if (step) entry.lines.push('出错环节：' + step);
+      }
+      diagState.instantiate.items.push(entry);
+    }
+
+    let picked = null;
+    try {
+      picked = await SyncDedup.pickRemoteDataGroup(d.repo);
+      diagState.instantiate.picked = picked ? (picked.id || '(无 id)') : null;
+    } catch (e) {
+      diagState.instantiate.error = 'pickRemoteDataGroup 失败：' + errText(e);
+    }
+    diagState.instantiate.items.push({
+      id: '(选用)', ok: !!picked, lines: [picked ? '已选中数据组：' + (picked.id || '(无 id)') : '没有选中任何数据同步组（pickRemoteDataGroup 返回 null）'],
+    });
+  } finally {
+    diagState.stage = '完成';
+    renderDiag();
+  }
+}
+
 // 同步组配置组件使用的 appId：同一 appId 下复用 zen-fs-config 的本地配置仓拓扑。
 const ZF_APP_ID = 'dir-struct-gen';
 
@@ -84,6 +314,7 @@ const dom = {
   btnCollapse: $('btn-collapse'),
   btnUpload: $('btn-upload'),
   rsStatus: $('rs-status'),
+  diagBody: $('diag-body'),
 
 
   btnLoadLocal: $('btn-load-local'),
@@ -1597,10 +1828,14 @@ function collectShardsFor(indexKey, volumeKey, names) {
 
 async function uploadToRS() {
   if (!state.root) { setRS('请先生成清单。', false); return; }
+  diagState.manifest = { generated: false, changed: null, written: false };
   if (!appFsRemoteReady) {
+    diagState.manifest.error = '已中止：' + (manifestBlockReason || '数据组后端未就绪，无法确定清单位置');
+    renderDiag();
     setRS('已中止生成：' + (manifestBlockReason || '数据组后端未就绪，无法确定清单位置') + '。', false);
     return;
   }
+  renderDiag();
 
   setRS('正在应用深挖标记…', null);
   try {
@@ -1623,6 +1858,9 @@ async function uploadToRS() {
     const manifest = await generateManifest();
     const file = state.computerId || 'fs-manifest';
     const hostName = sanitizeKey(file.endsWith('.json') ? file : file + '.json');
+    diagState.manifest.generated = true;
+    diagState.manifest.dir = mfPath('struct');
+    diagState.manifest.hostIndex = hostName;
     // 幂等：结构签名（去掉 generatedAt/updatedAt 等每次都会变的字段）与上次一致、
     // 且远端已有本次的主机索引时，直接跳过，零写入。
     const sig = SyncDedup.stableSignature({
@@ -1631,10 +1869,15 @@ async function uploadToRS() {
     });
     const last = readLastUpload();
     if (last && last.sig === sig && names.indexOf(hostName) !== -1) {
+      diagState.manifest.changed = false;
+      diagState.manifest.note = '结构签名未变化且远端已有主机索引，零写入';
+      renderDiag();
       setRS('内容未变化，已跳过上传（零写入）。', true);
       return;
     }
     const payload = buildV2Payload(manifest, file);
+    diagState.manifest.volumes = payload.volumes.length;
+    diagState.manifest.changed = true;
     await saveSettings(); // 记住已知分片，刷新后预览仍能列出同一卷的全部分片
 
     // 4) 只写自己本次的分片（<volumeId>.<createdAt>.json，全新文件名）：不再「读别人的文件 → 合并 → 写回同一文件」，
@@ -1665,8 +1908,14 @@ async function uploadToRS() {
     if (total) msg += '（已应用 ' + total + ' 个深挖标记）';
     if (warns.length) msg += '；未匹配路径：' + warns.join(', ');
     setRS(msg, true);
+    diagState.manifest.written = true;
+    diagState.manifest.volumes = uploaded;
+    renderDiag();
   } catch (err) {
     setRS('上传失败：' + err.message, false);
+    if (!diagState.manifest) diagState.manifest = { generated: false, changed: null, written: false };
+    diagState.manifest.error = errText(err);
+    renderDiag();
   }
   // 同步状态由 <sync-group-configurator> 在每个同步组卡片内展示，这里不再重复。
 }
@@ -1731,8 +1980,11 @@ async function ensureAppDataFs(detail) {
       manifestBlockReason = '尚未连接数据同步组';
     }
     updateSyncStatus();
+    void refreshDiag(d);
   } catch (err) {
     setRS('同步组就绪但获取文件系统失败：' + err.message, false);
+    diagPushError('ensureAppDataFs', err);
+    renderDiag();
   }
 }
 
@@ -2118,11 +2370,9 @@ dom.btnLoadRemote.addEventListener('click', loadRemoteJSON);
     if (dg && dg.fs) {
 
       appFs = dg.fs;
-      const types = SyncDedup.remoteBackendTypes(dg.listBackends && dg.listBackends());
-      appFsRemoteReady = types.length > 0;
-      currentRemoteTypes = types;
-      MANIFEST_ROOT = manifestRootFor(types);
+      applyManifestPlan(dg);
       updateSyncStatus();
+      void refreshDiag();
     } else {
       void ensureAppDataFs(null);
     }
@@ -2130,12 +2380,27 @@ dom.btnLoadRemote.addEventListener('click', loadRemoteJSON);
   // 若组件在绑定监听前已连好，用 getConnection() 兜底。
   const conn = el.getConnection && el.getConnection();
   if (conn) void ensureAppDataFs(conn);
-  else updateSyncStatus();
+  else {
+    diagState.stage = '未连接同步组';
+    updateSyncStatus();
+    renderDiag();
+  }
 })();
 
 // 启动时列出本机磁盘，并回填已保存的 UI 参数
 loadInitial();
 loadSettings();
+
+// 未捕获异常也进诊断面板，避免“页面看起来正常、实际某环已失败”。
+window.addEventListener('unhandledrejection', (e) => {
+  diagPushError('unhandledrejection', e.reason);
+  renderDiag();
+});
+window.addEventListener('error', (e) => {
+  diagPushError('window.error', e.error || e.message);
+  renderDiag();
+});
+renderDiag();
 
 // 左右分栏拖动：拖动中间分隔条调整「目录树」与「清单预览」的宽度占比。
 (function initSplitter() {
