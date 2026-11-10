@@ -138,3 +138,62 @@ test('pickRemoteDataGroup 对空仓库 / 无 repo 返回 null', async () => {
   assert.equal(await SD.pickRemoteDataGroup({}), null);
 });
 
+// ── 清单落点推导（manifestPlan）与幂等签名（stableSignature）──
+
+test('manifestPlan：只有 Gitee → 前缀 app_data/folders', () => {
+  const plan = SD.manifestPlan([{ id: 'g', type: 'Gitee', options: { owner: 'u', repo: 'r' } }]);
+  assert.equal(plan.ok, true);
+  assert.equal(plan.prefix, 'app_data/folders');
+});
+
+test('manifestPlan：RemoteStorage basePath=app_data/folders → 前缀为空', () => {
+  const plan = SD.manifestPlan([{ id: 'rs', type: 'RemoteStorage', options: { basePath: '/app_data/folders/' } }]);
+  assert.equal(plan.ok, true);
+  assert.equal(plan.prefix, '');
+});
+
+test('manifestPlan：RS 根 + Gitee 仓库根 → 前缀一致，可用', () => {
+  const plan = SD.manifestPlan([
+    { id: 'rs', type: 'RemoteStorage', options: { basePath: '/' } },
+    { id: 'g', type: 'Gitee', options: {} },
+  ]);
+  assert.equal(plan.ok, true);
+  assert.equal(plan.prefix, 'app_data/folders');
+});
+
+test('manifestPlan：RS 基准与 Gitee 不一致 → 不可用（不猜前缀）', () => {
+  const plan = SD.manifestPlan([
+    { id: 'rs', type: 'RemoteStorage', options: { basePath: '/app_data/folders/' } },
+    { id: 'g', type: 'Gitee', options: {} },
+  ]);
+  assert.equal(plan.ok, false);
+  assert.equal(plan.prefix, null);
+  assert.match(plan.reason, /不一致/);
+});
+
+test('manifestPlan：基准无法对齐 app_data/folders → 不可用', () => {
+  const plan = SD.manifestPlan([{ id: 'rs', type: 'RemoteStorage', options: { basePath: '/other' } }]);
+  assert.equal(plan.ok, false);
+  assert.match(plan.reason, /无法对齐/);
+});
+
+test('manifestPlan：无远端后端 / 本地-only → 不可用', () => {
+  assert.equal(SD.manifestPlan([]).ok, false);
+  assert.equal(SD.manifestPlan([{ id: 'mem', type: 'IndexedDB', options: {} }]).ok, false);
+});
+
+test('declaredBackends 优先 listDeclaredBackends，缺失时回退已连接列表', () => {
+  const declared = [{ id: 'a', type: 'Gitee', options: {} }, { id: 'b', type: 'RemoteStorage', options: {} }];
+  assert.deepEqual(SD.declaredBackends({ listDeclaredBackends: () => declared, listBackends: () => [declared[0]] }), declared);
+  assert.deepEqual(SD.declaredBackends({ listBackends: () => [declared[0]] }), [declared[0]]);
+  assert.deepEqual(SD.declaredBackends(null), []);
+});
+
+test('stableSignature 忽略 generatedAt/updatedAt，但识别真实内容变化', () => {
+  const a = { generatedAt: '2026-01-01T00:00:00Z', children: [{ name: 'a', updatedAt: 1 }] };
+  const b = { generatedAt: '2026-02-02T00:00:00Z', children: [{ name: 'a', updatedAt: 999 }] };
+  const c = { generatedAt: '2026-02-02T00:00:00Z', children: [{ name: 'b', updatedAt: 1 }] };
+  assert.equal(SD.stableSignature(a), SD.stableSignature(b));
+  assert.notEqual(SD.stableSignature(a), SD.stableSignature(c));
+});
+

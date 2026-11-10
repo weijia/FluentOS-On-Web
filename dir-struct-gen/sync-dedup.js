@@ -85,6 +85,93 @@
   // 本地-only 后端类型（数据同步组里只有这类后端时，不构成可上传的远端目标）。
   var LOCAL_BACKEND_TYPES = { InMemory: true, IndexedDB: true };
 
+  // onenav 读取清单的固定绝对位置（相对后端账号 / 仓库根）。
+  var MANIFEST_BASE = 'app_data/folders';
+
+  function stripSlashes(p) {
+    return String(p == null ? '' : p).replace(/^\/+/, '').replace(/\/+$/, '');
+  }
+
+  // 数据组的「声明后端」：组内 .meta/backends/ 为准；老版本没有该 API 时回退已连接列表。
+  function declaredBackends(group) {
+    if (!group) return [];
+    var list = typeof group.listDeclaredBackends === 'function' ? group.listDeclaredBackends() : null;
+    if (list && list.length) return list;
+    return typeof group.listBackends === 'function' ? (group.listBackends() || []) : [];
+  }
+
+  // 每个后端把「组根」映射到账号/仓库里的哪个绝对目录：
+  // RemoteStorage 由 basePath 决定；Gitee/GitHub/WebDAV 的组根就是仓库根。
+  function backendBaseOf(backend) {
+    if (!backend) return null;
+    if (backend.type === 'RemoteStorage') return stripSlashes((backend.options || {}).basePath);
+    return '';
+  }
+
+  /**
+   * 由后端配置推导「清单该写到哪个相对前缀」。
+   * 目标：所有后端都落到 <MANIFEST_BASE>/struct。前缀只能由基准路径算出，不做猜测：
+   *   - 任一后端基准无法对齐 → ok=false（调用方必须中止生成，不降级写入）；
+   *   - 多个后端要求不同前缀 → ok=false（一个相对路径不可能同时满足两份基准）。
+   */
+  function manifestPlan(backends) {
+    var remotes = (backends || []).filter(function (b) { return b && !LOCAL_BACKEND_TYPES[b.type]; });
+    if (!remotes.length) {
+      return { ok: false, prefix: null, types: [], reason: '数据组没有可用的远端后端（本地-only 或后端尚未加载）' };
+    }
+    var prefixes = [];
+    var details = [];
+    var types = [];
+    for (var i = 0; i < remotes.length; i++) {
+      var b = remotes[i];
+      var base = backendBaseOf(b);
+      var prefix;
+      if (base === MANIFEST_BASE) prefix = '';
+      else if (base === '') prefix = MANIFEST_BASE;
+      else {
+        return {
+          ok: false, prefix: null, types: types,
+          reason: b.type + '（' + b.id + '）的基准是 ' + base + '/，无法对齐 ' + MANIFEST_BASE + '/struct',
+        };
+      }
+      prefixes.push(prefix);
+      types.push(b.type);
+      details.push({ id: b.id, type: b.type, base: base, prefix: prefix });
+    }
+    var uniq = prefixes.filter(function (v, idx) { return prefixes.indexOf(v) === idx; });
+    if (uniq.length > 1) {
+      return {
+        ok: false, prefix: null, types: types, details: details,
+        reason: '后端基准不一致（' + details.map(function (d) {
+          return d.type + ':' + (d.prefix === '' ? '<组根>' : d.prefix + '/');
+        }).join('，') + '），同一个路径无法同时落到 ' + MANIFEST_BASE + '/struct；'
+          + '请把 RemoteStorage 的 basePath 改为 /（与其它后端共用仓库根），或只保留一个远端后端',
+      };
+    }
+    var uniqTypes = types.filter(function (v, idx) { return types.indexOf(v) === idx; });
+    return { ok: true, prefix: uniq[0], types: uniqTypes, details: details, reason: '' };
+  }
+
+  // 去掉每次生成都会变化的字段后做稳定 JSON，用于判断「内容是否真的变了」。
+  var VOLATILE_KEYS = { generatedAt: true, updatedAt: true };
+
+  function stableSignature(value) {
+    var walk = function (v) {
+      if (Array.isArray(v)) return v.map(walk);
+      if (v && typeof v === 'object') {
+        var out = {};
+        var keys = Object.keys(v).sort();
+        for (var i = 0; i < keys.length; i++) {
+          if (VOLATILE_KEYS[keys[i]]) continue;
+          out[keys[i]] = walk(v[keys[i]]);
+        }
+        return out;
+      }
+      return v;
+    };
+    return JSON.stringify(walk(value));
+  }
+
   // 排除本地-only 后端，返回真正的远端后端类型列表。
   function remoteBackendTypes(backends) {
     return (backends || []).filter(function (b) { return b && !LOCAL_BACKEND_TYPES[b.type]; }).map(function (b) { return b.type; });
@@ -114,7 +201,7 @@
         var g = groups[j];
         var dg = g;
         try { dg = await repo.getAppDataGroup(g.id); } catch (_) { continue; }
-        var bs = dg.listBackends ? dg.listBackends() : [];
+        var bs = declaredBackends(dg);
         var remote = bs.filter(function (b) { return b && !LOCAL_BACKEND_TYPES[b.type]; });
         if (remote.length === 0) continue;
         // 只要存在一个“与配置仓库不同”的远端后端，就采用该数据组。
@@ -135,6 +222,10 @@
     backendDedupKey: backendDedupKey,
     sameIdentity: sameIdentity,
     remoteBackendTypes: remoteBackendTypes,
+    declaredBackends: declaredBackends,
+    manifestPlan: manifestPlan,
+    stableSignature: stableSignature,
+    MANIFEST_BASE: MANIFEST_BASE,
     pickRemoteDataGroup: pickRemoteDataGroup,
   };
 });

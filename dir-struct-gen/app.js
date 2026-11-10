@@ -31,22 +31,39 @@ let appFs = null;
 let appFsRemoteReady = false;
 
 
-// 清单落点的「仓库内前缀」：
-// - RemoteStorage 后端：basePath 已把数据组根定位到 app_data/folders/，故前缀为空；
-// - Gitee 等其它远端后端：数据组根即仓库根，需手动在路径前加 app_data/folders，
-//   使清单落点与 RemoteStorage 逐字节一致（onenav 默认 base=app_data/folders 通用）。
+// 清单落点的「仓库内前缀」：由后端基准路径推导（见 SyncDedup.manifestPlan），不再靠类型猜。
 let MANIFEST_ROOT = '';
+// 落点不可用时记录原因（传给状态栏，便于定位是“没连上”还是“基准不一致”）。
+let manifestBlockReason = '';
 // 当前 app-data 数据组的实际远端后端类型列表（决定按钮文案 / 上传目标提示）。
 let currentRemoteTypes = [];
 // 拼接清单路径：p 形如 'struct/x.json' / 'folder-deepen/x.json' / 'struct'。
 function mfPath(p) {
   return MANIFEST_ROOT ? '/' + MANIFEST_ROOT + '/' + p : '/' + p;
 }
-// 根据数据组实际远端后端类型推导 MANIFEST_ROOT（RemoteStorage → 空；其余 → app_data/folders）。
-// 远端后端类型列表与“挑选含远端后端的数据同步组”见 sync-dedup.js（SyncDedup.remoteBackendTypes /
-// SyncDedup.pickRemoteDataGroup），此处只保留应用特定的落点推导。
-function manifestRootFor(types) {
-  return types.includes('RemoteStorage') ? '' : 'app_data/folders';
+// 落点推导见 sync-dedup.js 的 SyncDedup.manifestPlan：只认真实会收到写入的后端的基准路径，
+// 推导不出唯一前缀时判定不可用（调用方中止生成），绝不按类型猜一个前缀降级写入。
+function applyManifestPlan(group) {
+  const declared = SyncDedup.declaredBackends(group);
+  const declaredRemotes = SyncDedup.remoteBackendTypes(declared);
+  const connected = typeof group.listBackends === 'function' ? (group.listBackends() || []) : [];
+  const connectedRemotes = SyncDedup.remoteBackendTypes(connected);
+  let plan;
+  if (connectedRemotes.length) {
+    plan = SyncDedup.manifestPlan(connected);
+  } else if (declaredRemotes.length) {
+    // 已声明但一个都没连上：此刻写必然失败，也没有可靠的写入目标——明确报错，不猜位置。
+    plan = {
+      ok: false, prefix: null, types: declaredRemotes,
+      reason: '数据组已声明 ' + declaredRemotes.join(' / ') + ' 后端，但当前没有连上的远端后端',
+    };
+  } else {
+    plan = SyncDedup.manifestPlan(declared);
+  }
+  appFsRemoteReady = !!plan.ok;
+  currentRemoteTypes = plan.types || [];
+  MANIFEST_ROOT = plan.ok ? plan.prefix : '';
+  manifestBlockReason = plan.reason || '';
 }
 // 同步组配置组件使用的 appId：同一 appId 下复用 zen-fs-config 的本地配置仓拓扑。
 const ZF_APP_ID = 'dir-struct-gen';
@@ -1521,6 +1538,20 @@ function setRevision(partKey, rev) {
   } catch (_) { /* 隐私模式等场景下不可用：下次仍从 1 起算，不影响上传与合并 */ }
 }
 
+// 上一次成功上传的结构签名（本地记录，仅用于判断“内容没变 → 零写入”）。
+const LAST_UPLOAD_STORE = 'dirStructGen.lastUpload';
+function readLastUpload() {
+  try {
+    const v = JSON.parse(localStorage.getItem(LAST_UPLOAD_STORE) || 'null');
+    return (v && typeof v.sig === 'string') ? v : null;
+  } catch (_) { return null; }
+}
+function writeLastUpload(sig, hostName) {
+  try {
+    localStorage.setItem(LAST_UPLOAD_STORE, JSON.stringify({ sig, host: hostName, at: Date.now() }));
+  } catch (_) { /* 隐私模式等场景下不可用：退化为每次都写，不影响正确性 */ }
+}
+
 // 卷索引键：优先稳定身份 volumeId，其次回退「主机::盘符」（与 volumeKeyFor 同源）。
 function volumeIndexKey(volumeId, letter, source) {
   return volumeId ? String(volumeId) : ((source || state.computerId || '') + '::' + letter);
@@ -1567,7 +1598,7 @@ function collectShardsFor(indexKey, volumeKey, names) {
 async function uploadToRS() {
   if (!state.root) { setRS('请先生成清单。', false); return; }
   if (!appFsRemoteReady) {
-    setRS('请先在上方「后端 / 数据同步组」配置远端后端（RemoteStorage / Gitee 等），并等待同步组就绪。', false);
+    setRS('已中止生成：' + (manifestBlockReason || '数据组后端未就绪，无法确定清单位置') + '。', false);
     return;
   }
 
@@ -1591,6 +1622,18 @@ async function uploadToRS() {
     // 3) 复用与预览相同的 v2 拆分逻辑，保证「上传内容 == 预览内容」。
     const manifest = await generateManifest();
     const file = state.computerId || 'fs-manifest';
+    const hostName = sanitizeKey(file.endsWith('.json') ? file : file + '.json');
+    // 幂等：结构签名（去掉 generatedAt/updatedAt 等每次都会变的字段）与上次一致、
+    // 且远端已有本次的主机索引时，直接跳过，零写入。
+    const sig = SyncDedup.stableSignature({
+      manifest,
+      opts: { files: dom.optFiles.checked, sizes: dom.optSize.checked },
+    });
+    const last = readLastUpload();
+    if (last && last.sig === sig && names.indexOf(hostName) !== -1) {
+      setRS('内容未变化，已跳过上传（零写入）。', true);
+      return;
+    }
     const payload = buildV2Payload(manifest, file);
     await saveSettings(); // 记住已知分片，刷新后预览仍能列出同一卷的全部分片
 
@@ -1615,6 +1658,7 @@ async function uploadToRS() {
 
     // 6) 上传成功后落盘分片版本号（下次生成时 +1），并持久化已知分片清单。
     for (const [k, r] of revs) setRevision(k, r);
+    writeLastUpload(sig, hostName);
     await saveSettings();
 
     let msg = '上传成功：' + uploaded + ' 个卷分片 + 主机索引';
@@ -1660,10 +1704,7 @@ async function ensureAppDataFs(detail) {
     if (d.groupType === 'data-sync' && d.dataGroup) {
 
       appFs = d.dataGroup.fs;
-      const types = SyncDedup.remoteBackendTypes(d.dataGroup.listBackends && d.dataGroup.listBackends());
-      appFsRemoteReady = types.length > 0;
-      currentRemoteTypes = types;
-      MANIFEST_ROOT = manifestRootFor(types);
+      applyManifestPlan(d.dataGroup);
     } else if (d.groupType === 'config-sync' && d.repo) {
       // 配置同步组只承载配置，不承载目录数据，不再自动建 app-data 组当上传目标；
       // 但若仓库里已登记了「含远端后端的数据同步组」，则选用它作为上传目标——
@@ -1672,16 +1713,14 @@ async function ensureAppDataFs(detail) {
       if (picked) {
 
         appFs = picked.fs;
-        const types = SyncDedup.remoteBackendTypes(picked.listBackends && picked.listBackends());
-        appFsRemoteReady = types.length > 0;
-        currentRemoteTypes = types;
-        MANIFEST_ROOT = manifestRootFor(types);
+        applyManifestPlan(picked);
       } else {
 
         appFs = null;
         appFsRemoteReady = false;
         currentRemoteTypes = [];
         MANIFEST_ROOT = '';
+        manifestBlockReason = '没有可用的数据同步组';
       }
     } else {
 
@@ -1689,6 +1728,7 @@ async function ensureAppDataFs(detail) {
       appFsRemoteReady = false;
       currentRemoteTypes = [];
       MANIFEST_ROOT = '';
+      manifestBlockReason = '尚未连接数据同步组';
     }
     updateSyncStatus();
   } catch (err) {
@@ -1709,8 +1749,7 @@ function updateSyncStatus() {
     if (dom.btnUpload.textContent !== label) dom.btnUpload.textContent = label;
   }
   if (!appFsRemoteReady) {
-    setRS('请创建或连接「数据同步组」并配置远端后端（RemoteStorage / Gitee 等）；'
-      + '配置同步组仅管理配置，不承载目录数据上传。', null);
+    setRS('已中止生成：' + (manifestBlockReason || '数据组后端未就绪，无法确定清单位置') + '。', null);
   } else if (currentRemoteTypes.length) {
     setRS('数据同步组已就绪（' + currentRemoteTypes.join(' / ') + '）：点击上传后由本地 watcher 推到远端。', null);
   }
