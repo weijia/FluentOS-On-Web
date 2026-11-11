@@ -186,20 +186,35 @@ test('manifestPlan：RS 根 + Gitee 仓库根 → 前缀一致，可用', () => 
   assert.equal(plan.prefix, 'app_data/folders');
 });
 
-test('manifestPlan：RS 基准与 Gitee 不一致 → 不可用（不猜前缀）', () => {
+test('manifestPlan：RS 与 Gitee 基准不一致 → 仍可生成，前缀按最深基准取', () => {
   const plan = SD.manifestPlan([
     { id: 'rs', type: 'RemoteStorage', options: { basePath: '/app_data/folders/' } },
     { id: 'g', type: 'Gitee', options: {} },
   ]);
-  assert.equal(plan.ok, false);
-  assert.equal(plan.prefix, null);
-  assert.match(plan.reason, /不一致/);
+  assert.equal(plan.ok, true);
+  assert.equal(plan.prefix, '');
+  assert.deepEqual(plan.types.sort(), ['Gitee', 'RemoteStorage']);
 });
 
-test('manifestPlan：基准无法对齐 app_data/folders → 不可用', () => {
+test('manifestPlan：基准不在 MANIFEST_BASE 链上 → 仍可生成，按仓库根取前缀', () => {
   const plan = SD.manifestPlan([{ id: 'rs', type: 'RemoteStorage', options: { basePath: '/other' } }]);
-  assert.equal(plan.ok, false);
-  assert.match(plan.reason, /无法对齐/);
+  assert.equal(plan.ok, true);
+  assert.equal(plan.prefix, 'app_data/folders');
+});
+
+test('manifestPlan：基准比 MANIFEST_BASE 更深 → 前缀为空，不再叠加一层', () => {
+  const plan = SD.manifestPlan([{ id: 'rs', type: 'RemoteStorage', options: { basePath: '/app_data/folders/extra' } }]);
+  assert.equal(plan.ok, true);
+  assert.equal(plan.prefix, '');
+});
+
+test('manifestPlan：RemoteStorage 未填 basePath（后端根为 app_data/）→ 取 folders 前缀不叠加', () => {
+  const plan = SD.manifestPlan([
+    { id: 'rs', type: 'RemoteStorage', options: {} },
+    { id: 'g', type: 'Gitee', options: {} },
+  ]);
+  assert.equal(plan.ok, true);
+  assert.equal(plan.prefix, 'folders');
 });
 
 test('manifestPlan：无远端后端 / 本地-only → 不可用', () => {

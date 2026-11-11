@@ -24,8 +24,8 @@ const state = {
 
 // 已连接的「app-data 数据同步组」文件系统（zen-fs）。由同步组配置组件（zen-fs-config-ui）
 // 连接后注入；清单与深挖标记都写入它的根。远端后端可为 RemoteStorage 或 Gitee 等：
-// RemoteStorage 后端 basePath 固定 app_data/folders/，根即 app_data/folders/；Gitee 等后端
-// 根为仓库根，写入路径统一加 app_data/folders 前缀（见 MANIFEST_ROOT），落点与 RemoteStorage 逐字节一致。
+// RemoteStorage 的组根由 basePath 决定（填 / 即账号根，留空则根为 app_data/），Gitee 等后端的组根就是仓库根；
+// 各后端按自己的基准落到各自根下的同一逻辑路径，仓库内前缀统一由 SyncDedup.manifestPlan 推导（见 MANIFEST_ROOT）。
 let appFs = null;
 // 是否真有远端后端（首启本地-only 的 data-sync 组无远端，不允许上传）。
 let appFsRemoteReady = false;

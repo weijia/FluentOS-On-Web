@@ -62,9 +62,11 @@
         用下方的同步组组件配置后端：
         <b>配置同步组</b> → 仅管理配置，不承载目录数据上传；若其中已登记含远端后端的数据同步组，会自动选用它作为上传目标。
         <b>数据同步组</b> → 直接以该数据组的后端作为上传目标。
-        RemoteStorage 后端的 <b>basePath 请填 <code>app_data/folders/</code></b>（清单落在
-        <code>app_data/folders/struct/</code>，深挖标记落在 <code>app_data/folders/folder-deepen/</code>）；
-        Gitee 后端会在仓库内自动加 <code>app_data/folders/</code> 前缀，落点与 RemoteStorage 一致。
+        RemoteStorage 的 <b>basePath 决定它自己的物理落点</b>（逻辑路径始终是 <code>app_data/folders/struct/</code>）：
+        填 <code>/</code> 时落在 <code>&lt;服务器&gt;/app_data/folders/struct/</code>；填 <code>app_data/folders/</code>
+        也落在同一处（此时逻辑前缀为空）；留空则后端根为 <code>app_data/</code>，逻辑前缀为 <code>folders/</code>。
+        与 Gitee 等仓库根后端混用时不要求基准相同：前缀按基准最深的那个后端取，其余后端落在自己基准下的同一逻辑路径
+        （例如 Gitee 仓库根下就是 <code>struct/</code>）。
         按钮文案随实际后端类型动态显示。
       </p>
       <div id="storage-banner" class="storage-banner" hidden>

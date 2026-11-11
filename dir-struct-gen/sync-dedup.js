@@ -111,55 +111,60 @@
   }
 
   // 每个后端把「组根」映射到账号/仓库里的哪个绝对目录：
-  // RemoteStorage 由 basePath 决定；Gitee/GitHub/WebDAV 的组根就是仓库根。
+  // RemoteStorage 由 basePath 决定（vendor 里 basePath 为空时根落在 app_data/，填 / 时是账号根）；
+  // Gitee/GitHub/WebDAV 的组根就是仓库根。
   function backendBaseOf(backend) {
     if (!backend) return null;
-    if (backend.type === 'RemoteStorage') return stripSlashes((backend.options || {}).basePath);
+    if (backend.type === 'RemoteStorage') {
+      var bp = (backend.options || {}).basePath;
+      // 未填 basePath 时后端自己把根落在 app_data/，不能当成仓库根参与比较。
+      if (bp == null || String(bp).trim() === '') return 'app_data';
+      return stripSlashes(bp);
+    }
     return '';
+  }
+
+  // 一个后端基准 base 对应的「逻辑前缀」：使 base + prefix == MANIFEST_BASE。
+  // base 已在 MANIFEST_BASE 之内（等于或更深）时前缀为空，避免再叠加一层 app_data/folders；
+  // base 不在 MANIFEST_BASE 的前缀链上时返回 null（该后端怎么写都到不了 MANIFEST_BASE）。
+  function alignedPrefix(base) {
+    if (base === MANIFEST_BASE || base.indexOf(MANIFEST_BASE + '/') === 0) return '';
+    if (base === '') return MANIFEST_BASE;
+    if (MANIFEST_BASE.indexOf(base + '/') === 0) return MANIFEST_BASE.slice(base.length + 1);
+    return null;
   }
 
   /**
    * 由后端配置推导「清单该写到哪个相对前缀」。
-   * 目标：所有后端都落到 <MANIFEST_BASE>/struct。前缀只能由基准路径算出，不做猜测：
-   *   - 任一后端基准无法对齐 → ok=false（调用方必须中止生成，不降级写入）；
-   *   - 多个后端要求不同前缀 → ok=false（一个相对路径不可能同时满足两份基准）。
+   * 各后端按自己的 basePath 落到各自的物理位置，不要求共用同一基准：
+   *   - 前缀取「基准最深的那个后端」的对齐前缀，保证它自己不会叠加出 app_data/folders/app_data/folders；
+   *   - 其余后端会落在自己基准下的同一逻辑路径（可能不在 MANIFEST_BASE 下）；
+   *   - 没有任何后端能对齐时按仓库根处理（前缀 = MANIFEST_BASE）。
+   * 只有完全没有远端后端（没有写入目标）时才 ok=false。
    */
   function manifestPlan(backends) {
     var remotes = (backends || []).filter(function (b) { return b && !LOCAL_BACKEND_TYPES[b.type]; });
     if (!remotes.length) {
-      return { ok: false, prefix: null, types: [], reason: '数据组没有可用的远端后端（本地-only 或后端尚未加载）' };
+      return { ok: false, prefix: null, types: [], details: [], reason: '数据组没有可用的远端后端（本地-only 或后端尚未加载）' };
     }
-    var prefixes = [];
     var details = [];
     var types = [];
+    var prefix = null;
+    var deepest = -1;
     for (var i = 0; i < remotes.length; i++) {
       var b = remotes[i];
       var base = backendBaseOf(b);
-      var prefix;
-      if (base === MANIFEST_BASE) prefix = '';
-      else if (base === '') prefix = MANIFEST_BASE;
-      else {
-        return {
-          ok: false, prefix: null, types: types,
-          reason: b.type + '（' + b.id + '）的基准是 ' + base + '/，无法对齐 ' + MANIFEST_BASE + '/struct',
-        };
-      }
-      prefixes.push(prefix);
+      var p = alignedPrefix(base);
+      details.push({ id: b.id, type: b.type, base: base, prefix: p });
       types.push(b.type);
-      details.push({ id: b.id, type: b.type, base: base, prefix: prefix });
+      if (p !== null && base.length > deepest) {
+        deepest = base.length;
+        prefix = p;
+      }
     }
-    var uniq = prefixes.filter(function (v, idx) { return prefixes.indexOf(v) === idx; });
-    if (uniq.length > 1) {
-      return {
-        ok: false, prefix: null, types: types, details: details,
-        reason: '后端基准不一致（' + details.map(function (d) {
-          return d.type + ':' + (d.prefix === '' ? '<组根>' : d.prefix + '/');
-        }).join('，') + '），同一个路径无法同时落到 ' + MANIFEST_BASE + '/struct；'
-          + '请把 RemoteStorage 的 basePath 改为 /（与其它后端共用仓库根），或只保留一个远端后端',
-      };
-    }
+    if (prefix === null) prefix = MANIFEST_BASE;
     var uniqTypes = types.filter(function (v, idx) { return types.indexOf(v) === idx; });
-    return { ok: true, prefix: uniq[0], types: uniqTypes, details: details, reason: '' };
+    return { ok: true, prefix: prefix, types: uniqTypes, details: details, reason: '' };
   }
 
   // 去掉每次生成都会变化的字段后做稳定 JSON，用于判断「内容是否真的变了」。
