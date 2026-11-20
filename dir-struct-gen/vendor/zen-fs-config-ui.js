@@ -2184,12 +2184,12 @@ var ZenFSConfigUI = (() => {
       };
       _strictIndexes = false;
       ArrayType = (() => {
-        var _a9;
+        var _a11;
         let _instanceExtraInitializers = [];
         let _get___structArray_decorators;
         let _get___arrayType_decorators;
         let _get_array_decorators;
-        return _a9 = class {
+        return _a11 = class {
           /**
            * Use `ArrayType.for()` instead!
            * @todo [breaking] make this protected
@@ -2247,7 +2247,7 @@ var ZenFSConfigUI = (() => {
             const name = `${type.name}[${length}]`;
             let arrayType = this._cache.get(name);
             if (!arrayType)
-              this._cache.set(name, arrayType = new _a9(type, length));
+              this._cache.set(name, arrayType = new _a11(type, length));
             return arrayType;
           }
           /**
@@ -2261,12 +2261,12 @@ var ZenFSConfigUI = (() => {
           _get___structArray_decorators = [memoize];
           _get___arrayType_decorators = [memoize];
           _get_array_decorators = [memoize];
-          __esDecorate(_a9, null, _get___structArray_decorators, { kind: "getter", name: "__structArray", static: false, private: false, access: { has: (obj) => "__structArray" in obj, get: (obj) => obj.__structArray }, metadata: _metadata }, null, _instanceExtraInitializers);
-          __esDecorate(_a9, null, _get___arrayType_decorators, { kind: "getter", name: "__arrayType", static: false, private: false, access: { has: (obj) => "__arrayType" in obj, get: (obj) => obj.__arrayType }, metadata: _metadata }, null, _instanceExtraInitializers);
-          __esDecorate(_a9, null, _get_array_decorators, { kind: "getter", name: "array", static: false, private: false, access: { has: (obj) => "array" in obj, get: (obj) => obj.array }, metadata: _metadata }, null, _instanceExtraInitializers);
-          if (_metadata) Object.defineProperty(_a9, Symbol.metadata, { enumerable: true, configurable: true, writable: true, value: _metadata });
+          __esDecorate(_a11, null, _get___structArray_decorators, { kind: "getter", name: "__structArray", static: false, private: false, access: { has: (obj) => "__structArray" in obj, get: (obj) => obj.__structArray }, metadata: _metadata }, null, _instanceExtraInitializers);
+          __esDecorate(_a11, null, _get___arrayType_decorators, { kind: "getter", name: "__arrayType", static: false, private: false, access: { has: (obj) => "__arrayType" in obj, get: (obj) => obj.__arrayType }, metadata: _metadata }, null, _instanceExtraInitializers);
+          __esDecorate(_a11, null, _get_array_decorators, { kind: "getter", name: "array", static: false, private: false, access: { has: (obj) => "array" in obj, get: (obj) => obj.array }, metadata: _metadata }, null, _instanceExtraInitializers);
+          if (_metadata) Object.defineProperty(_a11, Symbol.metadata, { enumerable: true, configurable: true, writable: true, value: _metadata });
         })(), /** Array types are immutable and fully described by their name, so they can be shared. */
-        __publicField(_a9, "_cache", /* @__PURE__ */ new Map()), _a9;
+        __publicField(_a11, "_cache", /* @__PURE__ */ new Map()), _a11;
       })();
     }
   });
@@ -2292,7 +2292,7 @@ var ZenFSConfigUI = (() => {
     if (typeof this == "object")
       Object.assign(opts, this);
     return function __decorateStruct(target, context) {
-      var _a9, _b3;
+      var _a11, _b3;
       const init2 = initMetadata(context);
       let fieldAlignment = 1;
       const fields = [];
@@ -2315,7 +2315,7 @@ var ZenFSConfigUI = (() => {
       opts.alignment ?? (opts.alignment = fieldAlignment);
       if (!opts.isPacked)
         align(opts.alignment);
-      class _struct extends (_b3 = target, _a9 = Symbol.toStringTag, _b3) {
+      class _struct extends (_b3 = target, _a11 = Symbol.toStringTag, _b3) {
         static get(buffer, offset) {
           return new this(buffer, offset);
         }
@@ -2341,7 +2341,7 @@ var ZenFSConfigUI = (() => {
       __publicField(_struct, "isUnion", !!opts.isUnion);
       __publicField(_struct, "isDynamic", !!opts.isDynamic);
       __publicField(_struct, "fields", fields);
-      __publicField(_struct, _a9, `[struct ${target.name}]`);
+      __publicField(_struct, _a11, `[struct ${target.name}]`);
       definePrototypeFields(_struct);
       context.addInitializer(function() {
         Object.defineProperty(_struct, "name", { value: target.name });
@@ -2453,7 +2453,7 @@ var ZenFSConfigUI = (() => {
 
   // node_modules/memium/dist/structs.js
   function struct2(structName, fieldDecls, ...options) {
-    var _a9, _b3;
+    var _a11, _b3;
     const opts = options.reduce((acc, opt) => ({ ...acc, ...opt }), {});
     if (typeof this == "object")
       Object.assign(opts, this);
@@ -2481,7 +2481,7 @@ var ZenFSConfigUI = (() => {
     opts.alignment ?? (opts.alignment = fieldAlignment);
     if (!opts.isPacked)
       align(opts.alignment);
-    class _struct extends (_b3 = DataView, _a9 = Symbol.toStringTag, _b3) {
+    class _struct extends (_b3 = DataView, _a11 = Symbol.toStringTag, _b3) {
       static get(buffer, offset) {
         return new this(buffer, offset);
       }
@@ -2505,7 +2505,7 @@ var ZenFSConfigUI = (() => {
     __publicField(_struct, "isUnion", !!opts.isUnion);
     __publicField(_struct, "isDynamic", !!opts.isDynamic);
     __publicField(_struct, "fields", fields);
-    __publicField(_struct, _a9, `[struct ${structName}]`);
+    __publicField(_struct, _a11, `[struct ${structName}]`);
     for (const key of Object.getOwnPropertyNames(DataView.prototype)) {
       if (!key.startsWith("get") && !key.startsWith("set"))
         continue;
@@ -2530,7 +2530,7 @@ var ZenFSConfigUI = (() => {
       init_types2();
       init_structs_shared();
       struct2.extend = function(base, structName, fieldDecls, ...options) {
-        var _a9, _b3;
+        var _a11, _b3;
         const opts = options.reduce((acc, opt) => ({ ...acc, ...opt }), {});
         if (typeof this == "object")
           Object.assign(opts, this);
@@ -2558,7 +2558,7 @@ var ZenFSConfigUI = (() => {
         opts.alignment ?? (opts.alignment = fieldAlignment);
         if (!opts.isPacked)
           align(opts.alignment);
-        class _struct extends (_b3 = base, _a9 = Symbol.toStringTag, _b3) {
+        class _struct extends (_b3 = base, _a11 = Symbol.toStringTag, _b3) {
         }
         __publicField(_struct, "name", structName);
         __publicField(_struct, "size", size);
@@ -2566,7 +2566,7 @@ var ZenFSConfigUI = (() => {
         __publicField(_struct, "isUnion", !!opts.isUnion);
         __publicField(_struct, "isDynamic", !!opts.isDynamic);
         __publicField(_struct, "fields", fields);
-        __publicField(_struct, _a9, `[struct ${structName}]`);
+        __publicField(_struct, _a11, `[struct ${structName}]`);
         definePrototypeFields(_struct);
         registerType(_struct);
         return _struct;
@@ -3387,8 +3387,8 @@ var ZenFSConfigUI = (() => {
       rootIno = 0;
       maxDynamicData = 3968;
       Attribute = (() => {
-        var _a10, _keySize_accessor_storage, _valueSize_accessor_storage;
-        var _a9, _b3;
+        var _a12, _keySize_accessor_storage, _valueSize_accessor_storage;
+        var _a11, _b3;
         let _classDecorators = [struct.packed()];
         let _classDescriptor;
         let _classExtraInitializers = [];
@@ -3400,7 +3400,7 @@ var ZenFSConfigUI = (() => {
         let _valueSize_decorators;
         let _valueSize_initializers = [];
         let _valueSize_extraInitializers = [];
-        var Attribute2 = (_a10 = class extends _classSuper {
+        var Attribute2 = (_a12 = class extends _classSuper {
           constructor() {
             super(...arguments);
             __privateAdd(this, _keySize_accessor_storage, __runInitializers2(this, _keySize_initializers, void 0));
@@ -3446,25 +3446,25 @@ var ZenFSConfigUI = (() => {
           get size() {
             return 8 + this.keySize + this.valueSize;
           }
-        }, _keySize_accessor_storage = new WeakMap(), _valueSize_accessor_storage = new WeakMap(), _classThis = _a10, (() => {
+        }, _keySize_accessor_storage = new WeakMap(), _valueSize_accessor_storage = new WeakMap(), _classThis = _a12, (() => {
           const _metadata = typeof Symbol === "function" && Symbol.metadata ? Object.create(_classSuper[Symbol.metadata] ?? null) : void 0;
-          _keySize_decorators = [(_a9 = types2).uint32.bind(_a9)];
+          _keySize_decorators = [(_a11 = types2).uint32.bind(_a11)];
           _valueSize_decorators = [(_b3 = types2).uint32.bind(_b3)];
-          __esDecorate2(_a10, null, _keySize_decorators, { kind: "accessor", name: "keySize", static: false, private: false, access: { has: (obj) => "keySize" in obj, get: (obj) => obj.keySize, set: (obj, value) => {
+          __esDecorate2(_a12, null, _keySize_decorators, { kind: "accessor", name: "keySize", static: false, private: false, access: { has: (obj) => "keySize" in obj, get: (obj) => obj.keySize, set: (obj, value) => {
             obj.keySize = value;
           } }, metadata: _metadata }, _keySize_initializers, _keySize_extraInitializers);
-          __esDecorate2(_a10, null, _valueSize_decorators, { kind: "accessor", name: "valueSize", static: false, private: false, access: { has: (obj) => "valueSize" in obj, get: (obj) => obj.valueSize, set: (obj, value) => {
+          __esDecorate2(_a12, null, _valueSize_decorators, { kind: "accessor", name: "valueSize", static: false, private: false, access: { has: (obj) => "valueSize" in obj, get: (obj) => obj.valueSize, set: (obj, value) => {
             obj.valueSize = value;
           } }, metadata: _metadata }, _valueSize_initializers, _valueSize_extraInitializers);
           __esDecorate2(null, _classDescriptor = { value: _classThis }, _classDecorators, { kind: "class", name: _classThis.name, metadata: _metadata }, null, _classExtraInitializers);
           Attribute2 = _classThis = _classDescriptor.value;
           if (_metadata) Object.defineProperty(_classThis, Symbol.metadata, { enumerable: true, configurable: true, writable: true, value: _metadata });
-        })(), __publicField(_a10, "name", "Attribute"), __runInitializers2(_classThis, _classExtraInitializers), _a10);
+        })(), __publicField(_a12, "name", "Attribute"), __runInitializers2(_classThis, _classExtraInitializers), _a12);
         return Attribute2 = _classThis;
       })();
       Attributes = (() => {
-        var _a10, _size_accessor_storage;
-        var _a9;
+        var _a12, _size_accessor_storage;
+        var _a11;
         let _classDecorators = [struct.packed()];
         let _classDescriptor;
         let _classExtraInitializers = [];
@@ -3473,7 +3473,7 @@ var ZenFSConfigUI = (() => {
         let _size_decorators;
         let _size_initializers = [];
         let _size_extraInitializers = [];
-        var Attributes2 = (_a10 = class extends _classSuper {
+        var Attributes2 = (_a12 = class extends _classSuper {
           constructor() {
             super(...arguments);
             __privateAdd(this, _size_accessor_storage, __runInitializers2(this, _size_initializers, void 0));
@@ -3580,16 +3580,16 @@ var ZenFSConfigUI = (() => {
               offset += entry.size;
             }
           }
-        }, _size_accessor_storage = new WeakMap(), _classThis = _a10, (() => {
+        }, _size_accessor_storage = new WeakMap(), _classThis = _a12, (() => {
           const _metadata = typeof Symbol === "function" && Symbol.metadata ? Object.create(_classSuper[Symbol.metadata] ?? null) : void 0;
-          _size_decorators = [(_a9 = types2).uint32.bind(_a9)];
-          __esDecorate2(_a10, null, _size_decorators, { kind: "accessor", name: "size", static: false, private: false, access: { has: (obj) => "size" in obj, get: (obj) => obj.size, set: (obj, value) => {
+          _size_decorators = [(_a11 = types2).uint32.bind(_a11)];
+          __esDecorate2(_a12, null, _size_decorators, { kind: "accessor", name: "size", static: false, private: false, access: { has: (obj) => "size" in obj, get: (obj) => obj.size, set: (obj, value) => {
             obj.size = value;
           } }, metadata: _metadata }, _size_initializers, _size_extraInitializers);
           __esDecorate2(null, _classDescriptor = { value: _classThis }, _classDecorators, { kind: "class", name: _classThis.name, metadata: _metadata }, null, _classExtraInitializers);
           Attributes2 = _classThis = _classDescriptor.value;
           if (_metadata) Object.defineProperty(_classThis, Symbol.metadata, { enumerable: true, configurable: true, writable: true, value: _metadata });
-        })(), __publicField(_a10, "name", "Attributes"), __runInitializers2(_classThis, _classExtraInitializers), _a10);
+        })(), __publicField(_a12, "name", "Attributes"), __runInitializers2(_classThis, _classExtraInitializers), _a12);
         return Attributes2 = _classThis;
       })();
       _inode_fields = [
@@ -3632,8 +3632,8 @@ var ZenFSConfigUI = (() => {
       userVisibleFlags = 253951;
       userModifiableFlags = 229631;
       Inode = (() => {
-        var _a10, _data_accessor_storage, ___data_old_accessor_storage, _size_accessor_storage, _mode_accessor_storage, _nlink_accessor_storage, _uid_accessor_storage, _gid_accessor_storage, _atimeMs_accessor_storage, _birthtimeMs_accessor_storage, _mtimeMs_accessor_storage, _ctimeMs_accessor_storage, _ino_accessor_storage, ___ino_old_accessor_storage, _flags_accessor_storage, ___after_flags_accessor_storage, _version_accessor_storage, _rdev_accessor_storage, ___padding_accessor_storage, _attributes_accessor_storage, ___data_accessor_storage;
-        var _a9, _b3, _c3, _d3, _e3, _f2, _g2, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s;
+        var _a12, _data_accessor_storage, ___data_old_accessor_storage, _size_accessor_storage, _mode_accessor_storage, _nlink_accessor_storage, _uid_accessor_storage, _gid_accessor_storage, _atimeMs_accessor_storage, _birthtimeMs_accessor_storage, _mtimeMs_accessor_storage, _ctimeMs_accessor_storage, _ino_accessor_storage, ___ino_old_accessor_storage, _flags_accessor_storage, ___after_flags_accessor_storage, _version_accessor_storage, _rdev_accessor_storage, ___padding_accessor_storage, _attributes_accessor_storage, ___data_accessor_storage;
+        var _a11, _b3, _c3, _d3, _e3, _f2, _g2, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s;
         let _classDecorators = [struct.packed()];
         let _classDescriptor;
         let _classExtraInitializers = [];
@@ -3699,7 +3699,7 @@ var ZenFSConfigUI = (() => {
         let ___data_decorators;
         let ___data_initializers = [];
         let ___data_extraInitializers = [];
-        var Inode2 = (_a10 = class extends _classSuper {
+        var Inode2 = (_a12 = class extends _classSuper {
           constructor(...args) {
             let data = {};
             if (typeof args[0] === "object" && args[0] !== null && !ArrayBuffer.isView(args[0])) {
@@ -3935,9 +3935,9 @@ var ZenFSConfigUI = (() => {
               this.ctimeMs = Date.now();
             return hasChanged;
           }
-        }, _data_accessor_storage = new WeakMap(), ___data_old_accessor_storage = new WeakMap(), _size_accessor_storage = new WeakMap(), _mode_accessor_storage = new WeakMap(), _nlink_accessor_storage = new WeakMap(), _uid_accessor_storage = new WeakMap(), _gid_accessor_storage = new WeakMap(), _atimeMs_accessor_storage = new WeakMap(), _birthtimeMs_accessor_storage = new WeakMap(), _mtimeMs_accessor_storage = new WeakMap(), _ctimeMs_accessor_storage = new WeakMap(), _ino_accessor_storage = new WeakMap(), ___ino_old_accessor_storage = new WeakMap(), _flags_accessor_storage = new WeakMap(), ___after_flags_accessor_storage = new WeakMap(), _version_accessor_storage = new WeakMap(), _rdev_accessor_storage = new WeakMap(), ___padding_accessor_storage = new WeakMap(), _attributes_accessor_storage = new WeakMap(), ___data_accessor_storage = new WeakMap(), _classThis = _a10, (() => {
+        }, _data_accessor_storage = new WeakMap(), ___data_old_accessor_storage = new WeakMap(), _size_accessor_storage = new WeakMap(), _mode_accessor_storage = new WeakMap(), _nlink_accessor_storage = new WeakMap(), _uid_accessor_storage = new WeakMap(), _gid_accessor_storage = new WeakMap(), _atimeMs_accessor_storage = new WeakMap(), _birthtimeMs_accessor_storage = new WeakMap(), _mtimeMs_accessor_storage = new WeakMap(), _ctimeMs_accessor_storage = new WeakMap(), _ino_accessor_storage = new WeakMap(), ___ino_old_accessor_storage = new WeakMap(), _flags_accessor_storage = new WeakMap(), ___after_flags_accessor_storage = new WeakMap(), _version_accessor_storage = new WeakMap(), _rdev_accessor_storage = new WeakMap(), ___padding_accessor_storage = new WeakMap(), _attributes_accessor_storage = new WeakMap(), ___data_accessor_storage = new WeakMap(), _classThis = _a12, (() => {
           const _metadata = typeof Symbol === "function" && Symbol.metadata ? Object.create(_classSuper[Symbol.metadata] ?? null) : void 0;
-          _data_decorators = [(_a9 = types2).uint32.bind(_a9)];
+          _data_decorators = [(_a11 = types2).uint32.bind(_a11)];
           ___data_old_decorators = [(_b3 = types2).uint32.bind(_b3)];
           _size_decorators = [(_c3 = types2).uint32.bind(_c3)];
           _mode_decorators = [(_d3 = types2).uint16.bind(_d3)];
@@ -3957,70 +3957,70 @@ var ZenFSConfigUI = (() => {
           ___padding_decorators = [types2.uint8(44)];
           _attributes_decorators = [field(Attributes)];
           ___data_decorators = [types2.uint8(maxDynamicData)];
-          __esDecorate2(_a10, null, _data_decorators, { kind: "accessor", name: "data", static: false, private: false, access: { has: (obj) => "data" in obj, get: (obj) => obj.data, set: (obj, value) => {
+          __esDecorate2(_a12, null, _data_decorators, { kind: "accessor", name: "data", static: false, private: false, access: { has: (obj) => "data" in obj, get: (obj) => obj.data, set: (obj, value) => {
             obj.data = value;
           } }, metadata: _metadata }, _data_initializers, _data_extraInitializers);
-          __esDecorate2(_a10, null, ___data_old_decorators, { kind: "accessor", name: "__data_old", static: false, private: false, access: { has: (obj) => "__data_old" in obj, get: (obj) => obj.__data_old, set: (obj, value) => {
+          __esDecorate2(_a12, null, ___data_old_decorators, { kind: "accessor", name: "__data_old", static: false, private: false, access: { has: (obj) => "__data_old" in obj, get: (obj) => obj.__data_old, set: (obj, value) => {
             obj.__data_old = value;
           } }, metadata: _metadata }, ___data_old_initializers, ___data_old_extraInitializers);
-          __esDecorate2(_a10, null, _size_decorators, { kind: "accessor", name: "size", static: false, private: false, access: { has: (obj) => "size" in obj, get: (obj) => obj.size, set: (obj, value) => {
+          __esDecorate2(_a12, null, _size_decorators, { kind: "accessor", name: "size", static: false, private: false, access: { has: (obj) => "size" in obj, get: (obj) => obj.size, set: (obj, value) => {
             obj.size = value;
           } }, metadata: _metadata }, _size_initializers, _size_extraInitializers);
-          __esDecorate2(_a10, null, _mode_decorators, { kind: "accessor", name: "mode", static: false, private: false, access: { has: (obj) => "mode" in obj, get: (obj) => obj.mode, set: (obj, value) => {
+          __esDecorate2(_a12, null, _mode_decorators, { kind: "accessor", name: "mode", static: false, private: false, access: { has: (obj) => "mode" in obj, get: (obj) => obj.mode, set: (obj, value) => {
             obj.mode = value;
           } }, metadata: _metadata }, _mode_initializers, _mode_extraInitializers);
-          __esDecorate2(_a10, null, _nlink_decorators, { kind: "accessor", name: "nlink", static: false, private: false, access: { has: (obj) => "nlink" in obj, get: (obj) => obj.nlink, set: (obj, value) => {
+          __esDecorate2(_a12, null, _nlink_decorators, { kind: "accessor", name: "nlink", static: false, private: false, access: { has: (obj) => "nlink" in obj, get: (obj) => obj.nlink, set: (obj, value) => {
             obj.nlink = value;
           } }, metadata: _metadata }, _nlink_initializers, _nlink_extraInitializers);
-          __esDecorate2(_a10, null, _uid_decorators, { kind: "accessor", name: "uid", static: false, private: false, access: { has: (obj) => "uid" in obj, get: (obj) => obj.uid, set: (obj, value) => {
+          __esDecorate2(_a12, null, _uid_decorators, { kind: "accessor", name: "uid", static: false, private: false, access: { has: (obj) => "uid" in obj, get: (obj) => obj.uid, set: (obj, value) => {
             obj.uid = value;
           } }, metadata: _metadata }, _uid_initializers, _uid_extraInitializers);
-          __esDecorate2(_a10, null, _gid_decorators, { kind: "accessor", name: "gid", static: false, private: false, access: { has: (obj) => "gid" in obj, get: (obj) => obj.gid, set: (obj, value) => {
+          __esDecorate2(_a12, null, _gid_decorators, { kind: "accessor", name: "gid", static: false, private: false, access: { has: (obj) => "gid" in obj, get: (obj) => obj.gid, set: (obj, value) => {
             obj.gid = value;
           } }, metadata: _metadata }, _gid_initializers, _gid_extraInitializers);
-          __esDecorate2(_a10, null, _atimeMs_decorators, { kind: "accessor", name: "atimeMs", static: false, private: false, access: { has: (obj) => "atimeMs" in obj, get: (obj) => obj.atimeMs, set: (obj, value) => {
+          __esDecorate2(_a12, null, _atimeMs_decorators, { kind: "accessor", name: "atimeMs", static: false, private: false, access: { has: (obj) => "atimeMs" in obj, get: (obj) => obj.atimeMs, set: (obj, value) => {
             obj.atimeMs = value;
           } }, metadata: _metadata }, _atimeMs_initializers, _atimeMs_extraInitializers);
-          __esDecorate2(_a10, null, _birthtimeMs_decorators, { kind: "accessor", name: "birthtimeMs", static: false, private: false, access: { has: (obj) => "birthtimeMs" in obj, get: (obj) => obj.birthtimeMs, set: (obj, value) => {
+          __esDecorate2(_a12, null, _birthtimeMs_decorators, { kind: "accessor", name: "birthtimeMs", static: false, private: false, access: { has: (obj) => "birthtimeMs" in obj, get: (obj) => obj.birthtimeMs, set: (obj, value) => {
             obj.birthtimeMs = value;
           } }, metadata: _metadata }, _birthtimeMs_initializers, _birthtimeMs_extraInitializers);
-          __esDecorate2(_a10, null, _mtimeMs_decorators, { kind: "accessor", name: "mtimeMs", static: false, private: false, access: { has: (obj) => "mtimeMs" in obj, get: (obj) => obj.mtimeMs, set: (obj, value) => {
+          __esDecorate2(_a12, null, _mtimeMs_decorators, { kind: "accessor", name: "mtimeMs", static: false, private: false, access: { has: (obj) => "mtimeMs" in obj, get: (obj) => obj.mtimeMs, set: (obj, value) => {
             obj.mtimeMs = value;
           } }, metadata: _metadata }, _mtimeMs_initializers, _mtimeMs_extraInitializers);
-          __esDecorate2(_a10, null, _ctimeMs_decorators, { kind: "accessor", name: "ctimeMs", static: false, private: false, access: { has: (obj) => "ctimeMs" in obj, get: (obj) => obj.ctimeMs, set: (obj, value) => {
+          __esDecorate2(_a12, null, _ctimeMs_decorators, { kind: "accessor", name: "ctimeMs", static: false, private: false, access: { has: (obj) => "ctimeMs" in obj, get: (obj) => obj.ctimeMs, set: (obj, value) => {
             obj.ctimeMs = value;
           } }, metadata: _metadata }, _ctimeMs_initializers, _ctimeMs_extraInitializers);
-          __esDecorate2(_a10, null, _ino_decorators, { kind: "accessor", name: "ino", static: false, private: false, access: { has: (obj) => "ino" in obj, get: (obj) => obj.ino, set: (obj, value) => {
+          __esDecorate2(_a12, null, _ino_decorators, { kind: "accessor", name: "ino", static: false, private: false, access: { has: (obj) => "ino" in obj, get: (obj) => obj.ino, set: (obj, value) => {
             obj.ino = value;
           } }, metadata: _metadata }, _ino_initializers, _ino_extraInitializers);
-          __esDecorate2(_a10, null, ___ino_old_decorators, { kind: "accessor", name: "__ino_old", static: false, private: false, access: { has: (obj) => "__ino_old" in obj, get: (obj) => obj.__ino_old, set: (obj, value) => {
+          __esDecorate2(_a12, null, ___ino_old_decorators, { kind: "accessor", name: "__ino_old", static: false, private: false, access: { has: (obj) => "__ino_old" in obj, get: (obj) => obj.__ino_old, set: (obj, value) => {
             obj.__ino_old = value;
           } }, metadata: _metadata }, ___ino_old_initializers, ___ino_old_extraInitializers);
-          __esDecorate2(_a10, null, _flags_decorators, { kind: "accessor", name: "flags", static: false, private: false, access: { has: (obj) => "flags" in obj, get: (obj) => obj.flags, set: (obj, value) => {
+          __esDecorate2(_a12, null, _flags_decorators, { kind: "accessor", name: "flags", static: false, private: false, access: { has: (obj) => "flags" in obj, get: (obj) => obj.flags, set: (obj, value) => {
             obj.flags = value;
           } }, metadata: _metadata }, _flags_initializers, _flags_extraInitializers);
-          __esDecorate2(_a10, null, ___after_flags_decorators, { kind: "accessor", name: "__after_flags", static: false, private: false, access: { has: (obj) => "__after_flags" in obj, get: (obj) => obj.__after_flags, set: (obj, value) => {
+          __esDecorate2(_a12, null, ___after_flags_decorators, { kind: "accessor", name: "__after_flags", static: false, private: false, access: { has: (obj) => "__after_flags" in obj, get: (obj) => obj.__after_flags, set: (obj, value) => {
             obj.__after_flags = value;
           } }, metadata: _metadata }, ___after_flags_initializers, ___after_flags_extraInitializers);
-          __esDecorate2(_a10, null, _version_decorators, { kind: "accessor", name: "version", static: false, private: false, access: { has: (obj) => "version" in obj, get: (obj) => obj.version, set: (obj, value) => {
+          __esDecorate2(_a12, null, _version_decorators, { kind: "accessor", name: "version", static: false, private: false, access: { has: (obj) => "version" in obj, get: (obj) => obj.version, set: (obj, value) => {
             obj.version = value;
           } }, metadata: _metadata }, _version_initializers, _version_extraInitializers);
-          __esDecorate2(_a10, null, _rdev_decorators, { kind: "accessor", name: "rdev", static: false, private: false, access: { has: (obj) => "rdev" in obj, get: (obj) => obj.rdev, set: (obj, value) => {
+          __esDecorate2(_a12, null, _rdev_decorators, { kind: "accessor", name: "rdev", static: false, private: false, access: { has: (obj) => "rdev" in obj, get: (obj) => obj.rdev, set: (obj, value) => {
             obj.rdev = value;
           } }, metadata: _metadata }, _rdev_initializers, _rdev_extraInitializers);
-          __esDecorate2(_a10, null, ___padding_decorators, { kind: "accessor", name: "__padding", static: false, private: false, access: { has: (obj) => "__padding" in obj, get: (obj) => obj.__padding, set: (obj, value) => {
+          __esDecorate2(_a12, null, ___padding_decorators, { kind: "accessor", name: "__padding", static: false, private: false, access: { has: (obj) => "__padding" in obj, get: (obj) => obj.__padding, set: (obj, value) => {
             obj.__padding = value;
           } }, metadata: _metadata }, ___padding_initializers, ___padding_extraInitializers);
-          __esDecorate2(_a10, null, _attributes_decorators, { kind: "accessor", name: "attributes", static: false, private: false, access: { has: (obj) => "attributes" in obj, get: (obj) => obj.attributes, set: (obj, value) => {
+          __esDecorate2(_a12, null, _attributes_decorators, { kind: "accessor", name: "attributes", static: false, private: false, access: { has: (obj) => "attributes" in obj, get: (obj) => obj.attributes, set: (obj, value) => {
             obj.attributes = value;
           } }, metadata: _metadata }, _attributes_initializers, _attributes_extraInitializers);
-          __esDecorate2(_a10, null, ___data_decorators, { kind: "accessor", name: "__data", static: false, private: false, access: { has: (obj) => "__data" in obj, get: (obj) => obj.__data, set: (obj, value) => {
+          __esDecorate2(_a12, null, ___data_decorators, { kind: "accessor", name: "__data", static: false, private: false, access: { has: (obj) => "__data" in obj, get: (obj) => obj.__data, set: (obj, value) => {
             obj.__data = value;
           } }, metadata: _metadata }, ___data_initializers, ___data_extraInitializers);
           __esDecorate2(null, _classDescriptor = { value: _classThis }, _classDecorators, { kind: "class", name: _classThis.name, metadata: _metadata }, null, _classExtraInitializers);
           Inode2 = _classThis = _classDescriptor.value;
           if (_metadata) Object.defineProperty(_classThis, Symbol.metadata, { enumerable: true, configurable: true, writable: true, value: _metadata });
-        })(), __publicField(_a10, "name", "Inode"), __runInitializers2(_classThis, _classExtraInitializers), _a10);
+        })(), __publicField(_a12, "name", "Inode"), __runInitializers2(_classThis, _classExtraInitializers), _a12);
         return Inode2 = _classThis;
       })();
     }
@@ -4583,8 +4583,8 @@ var ZenFSConfigUI = (() => {
          * @internal
          */
         _cached(id, info2) {
-          var _a9;
-          (_a9 = this.store).cache ?? (_a9.cache = /* @__PURE__ */ new Map());
+          var _a11;
+          (_a11 = this.store).cache ?? (_a11.cache = /* @__PURE__ */ new Map());
           const resource = this.store.cache.get(id);
           if (!resource)
             return !info2 ? void 0 : new Resource(id, info2.size, {}, this.store.cache);
@@ -8155,11 +8155,11 @@ var ZenFSConfigUI = (() => {
         }
       };
       RwLockable = (() => {
-        var _a9;
+        var _a11;
         let _instanceExtraInitializers = [];
         let _get_lock_decorators;
         let _get_lockSync_decorators;
-        return _a9 = class {
+        return _a11 = class {
           constructor() {
             __publicField(this, "_rwLock", (__runInitializers3(this, _instanceExtraInitializers), new RwLock()));
           }
@@ -8179,10 +8179,10 @@ var ZenFSConfigUI = (() => {
           const _metadata = typeof Symbol === "function" && Symbol.metadata ? /* @__PURE__ */ Object.create(null) : void 0;
           _get_lock_decorators = [memoize];
           _get_lockSync_decorators = [memoize];
-          __esDecorate3(_a9, null, _get_lock_decorators, { kind: "getter", name: "lock", static: false, private: false, access: { has: (obj) => "lock" in obj, get: (obj) => obj.lock }, metadata: _metadata }, null, _instanceExtraInitializers);
-          __esDecorate3(_a9, null, _get_lockSync_decorators, { kind: "getter", name: "lockSync", static: false, private: false, access: { has: (obj) => "lockSync" in obj, get: (obj) => obj.lockSync }, metadata: _metadata }, null, _instanceExtraInitializers);
-          if (_metadata) Object.defineProperty(_a9, Symbol.metadata, { enumerable: true, configurable: true, writable: true, value: _metadata });
-        })(), _a9;
+          __esDecorate3(_a11, null, _get_lock_decorators, { kind: "getter", name: "lock", static: false, private: false, access: { has: (obj) => "lock" in obj, get: (obj) => obj.lock }, metadata: _metadata }, null, _instanceExtraInitializers);
+          __esDecorate3(_a11, null, _get_lockSync_decorators, { kind: "getter", name: "lockSync", static: false, private: false, access: { has: (obj) => "lockSync" in obj, get: (obj) => obj.lockSync }, metadata: _metadata }, null, _instanceExtraInitializers);
+          if (_metadata) Object.defineProperty(_a11, Symbol.metadata, { enumerable: true, configurable: true, writable: true, value: _metadata });
+        })(), _a11;
       })();
       Semaphore = class {
         constructor(max) {
@@ -8818,11 +8818,11 @@ var ZenFSConfigUI = (() => {
       });
       streamChunkSize = 65536;
       Handle = (() => {
-        var _a9;
+        var _a11;
         let _instanceExtraInitializers = [];
         let _get_inode_decorators;
         let _get_fs_decorators;
-        return _a9 = class {
+        return _a11 = class {
           /**
            * Creates a file handle for the vnode.
            */
@@ -9365,10 +9365,10 @@ var ZenFSConfigUI = (() => {
           }
         }, (() => {
           const _metadata = typeof Symbol === "function" && Symbol.metadata ? /* @__PURE__ */ Object.create(null) : void 0;
-          __esDecorate4(_a9, null, _get_inode_decorators, { kind: "getter", name: "inode", static: false, private: false, access: { has: (obj) => "inode" in obj, get: (obj) => obj.inode }, metadata: _metadata }, null, _instanceExtraInitializers);
-          __esDecorate4(_a9, null, _get_fs_decorators, { kind: "getter", name: "fs", static: false, private: false, access: { has: (obj) => "fs" in obj, get: (obj) => obj.fs }, metadata: _metadata }, null, _instanceExtraInitializers);
-          if (_metadata) Object.defineProperty(_a9, Symbol.metadata, { enumerable: true, configurable: true, writable: true, value: _metadata });
-        })(), _a9;
+          __esDecorate4(_a11, null, _get_inode_decorators, { kind: "getter", name: "inode", static: false, private: false, access: { has: (obj) => "inode" in obj, get: (obj) => obj.inode }, metadata: _metadata }, null, _instanceExtraInitializers);
+          __esDecorate4(_a11, null, _get_fs_decorators, { kind: "getter", name: "fs", static: false, private: false, access: { has: (obj) => "fs" in obj, get: (obj) => obj.fs }, metadata: _metadata }, null, _instanceExtraInitializers);
+          if (_metadata) Object.defineProperty(_a11, Symbol.metadata, { enumerable: true, configurable: true, writable: true, value: _metadata });
+        })(), _a11;
       })();
     }
   });
@@ -19304,8 +19304,8 @@ var ZenFSConfigUI = (() => {
         unitDisplay: "narrow"
       }));
       MetadataEntry = (() => {
-        var _a10, _id_accessor_storage, _offset__accessor_storage, _offset_accessor_storage, _size_accessor_storage;
-        var _a9, _b3, _c3, _d3;
+        var _a12, _id_accessor_storage, _offset__accessor_storage, _offset_accessor_storage, _size_accessor_storage;
+        var _a11, _b3, _c3, _d3;
         let _classDecorators = [struct.packed()];
         let _classDescriptor;
         let _classExtraInitializers = [];
@@ -19323,7 +19323,7 @@ var ZenFSConfigUI = (() => {
         let _size_decorators;
         let _size_initializers = [];
         let _size_extraInitializers = [];
-        var MetadataEntry2 = (_a10 = class extends _classSuper {
+        var MetadataEntry2 = (_a12 = class extends _classSuper {
           constructor() {
             super(...arguments);
             __privateAdd(this, _id_accessor_storage, __runInitializers5(this, _id_initializers, void 0));
@@ -19363,35 +19363,35 @@ var ZenFSConfigUI = (() => {
           toString() {
             return `<MetadataEntry @ ${hex(this.byteOffset)}>`;
           }
-        }, _id_accessor_storage = new WeakMap(), _offset__accessor_storage = new WeakMap(), _offset_accessor_storage = new WeakMap(), _size_accessor_storage = new WeakMap(), _classThis = _a10, (() => {
+        }, _id_accessor_storage = new WeakMap(), _offset__accessor_storage = new WeakMap(), _offset_accessor_storage = new WeakMap(), _size_accessor_storage = new WeakMap(), _classThis = _a12, (() => {
           const _metadata = typeof Symbol === "function" && Symbol.metadata ? Object.create(_classSuper[Symbol.metadata] ?? null) : void 0;
-          _id_decorators = [(_a9 = types2).uint32.bind(_a9)];
+          _id_decorators = [(_a11 = types2).uint32.bind(_a11)];
           _offset__decorators = [(_b3 = types2).uint32.bind(_b3)];
           _offset_decorators = [(_c3 = types2).uint32.bind(_c3)];
           _size_decorators = [(_d3 = types2).uint32.bind(_d3)];
-          __esDecorate5(_a10, null, _id_decorators, { kind: "accessor", name: "id", static: false, private: false, access: { has: (obj) => "id" in obj, get: (obj) => obj.id, set: (obj, value) => {
+          __esDecorate5(_a12, null, _id_decorators, { kind: "accessor", name: "id", static: false, private: false, access: { has: (obj) => "id" in obj, get: (obj) => obj.id, set: (obj, value) => {
             obj.id = value;
           } }, metadata: _metadata }, _id_initializers, _id_extraInitializers);
-          __esDecorate5(_a10, null, _offset__decorators, { kind: "accessor", name: "offset_", static: false, private: false, access: { has: (obj) => "offset_" in obj, get: (obj) => obj.offset_, set: (obj, value) => {
+          __esDecorate5(_a12, null, _offset__decorators, { kind: "accessor", name: "offset_", static: false, private: false, access: { has: (obj) => "offset_" in obj, get: (obj) => obj.offset_, set: (obj, value) => {
             obj.offset_ = value;
           } }, metadata: _metadata }, _offset__initializers, _offset__extraInitializers);
-          __esDecorate5(_a10, null, _offset_decorators, { kind: "accessor", name: "offset", static: false, private: false, access: { has: (obj) => "offset" in obj, get: (obj) => obj.offset, set: (obj, value) => {
+          __esDecorate5(_a12, null, _offset_decorators, { kind: "accessor", name: "offset", static: false, private: false, access: { has: (obj) => "offset" in obj, get: (obj) => obj.offset, set: (obj, value) => {
             obj.offset = value;
           } }, metadata: _metadata }, _offset_initializers, _offset_extraInitializers);
-          __esDecorate5(_a10, null, _size_decorators, { kind: "accessor", name: "size", static: false, private: false, access: { has: (obj) => "size" in obj, get: (obj) => obj.size, set: (obj, value) => {
+          __esDecorate5(_a12, null, _size_decorators, { kind: "accessor", name: "size", static: false, private: false, access: { has: (obj) => "size" in obj, get: (obj) => obj.size, set: (obj, value) => {
             obj.size = value;
           } }, metadata: _metadata }, _size_initializers, _size_extraInitializers);
           __esDecorate5(null, _classDescriptor = { value: _classThis }, _classDecorators, { kind: "class", name: _classThis.name, metadata: _metadata }, null, _classExtraInitializers);
           MetadataEntry2 = _classThis = _classDescriptor.value;
           if (_metadata) Object.defineProperty(_classThis, Symbol.metadata, { enumerable: true, configurable: true, writable: true, value: _metadata });
-        })(), __publicField(_a10, "name", "MetadataEntry"), __runInitializers5(_classThis, _classExtraInitializers), _a10);
+        })(), __publicField(_a12, "name", "MetadataEntry"), __runInitializers5(_classThis, _classExtraInitializers), _a12);
         return MetadataEntry2 = _classThis;
       })();
       entries_per_block = 255;
       max_lock_attempts = 5;
       MetadataBlock = (() => {
-        var _a10, _checksum_accessor_storage, _timestamp_accessor_storage, _previous_offset_accessor_storage, _items_accessor_storage, _locked_accessor_storage;
-        var _a9, _b3, _c3, _d3;
+        var _a12, _checksum_accessor_storage, _timestamp_accessor_storage, _previous_offset_accessor_storage, _items_accessor_storage, _locked_accessor_storage;
+        var _a11, _b3, _c3, _d3;
         let _classDecorators = [struct.packed()];
         let _classDescriptor;
         let _classExtraInitializers = [];
@@ -19412,7 +19412,7 @@ var ZenFSConfigUI = (() => {
         let _locked_decorators;
         let _locked_initializers = [];
         let _locked_extraInitializers = [];
-        var MetadataBlock2 = (_a10 = class extends _classSuper {
+        var MetadataBlock2 = (_a12 = class extends _classSuper {
           constructor() {
             super(...arguments);
             __privateAdd(this, _checksum_accessor_storage, __runInitializers5(this, _checksum_initializers, void 0));
@@ -19517,40 +19517,40 @@ var ZenFSConfigUI = (() => {
             release[Symbol.dispose] = release;
             return release;
           }
-        }, _checksum_accessor_storage = new WeakMap(), _timestamp_accessor_storage = new WeakMap(), _previous_offset_accessor_storage = new WeakMap(), _items_accessor_storage = new WeakMap(), _locked_accessor_storage = new WeakMap(), _classThis = _a10, (() => {
+        }, _checksum_accessor_storage = new WeakMap(), _timestamp_accessor_storage = new WeakMap(), _previous_offset_accessor_storage = new WeakMap(), _items_accessor_storage = new WeakMap(), _locked_accessor_storage = new WeakMap(), _classThis = _a12, (() => {
           const _metadata = typeof Symbol === "function" && Symbol.metadata ? Object.create(_classSuper[Symbol.metadata] ?? null) : void 0;
-          _checksum_decorators = [(_a9 = types2).uint32.bind(_a9)];
+          _checksum_decorators = [(_a11 = types2).uint32.bind(_a11)];
           _timestamp_decorators = [(_b3 = types2).uint64.bind(_b3)];
           _previous_offset_decorators = [(_c3 = types2).uint32.bind(_c3)];
           _items_decorators = [field(array(MetadataEntry, entries_per_block))];
           _locked_decorators = [(_d3 = types2).int32.bind(_d3)];
-          __esDecorate5(_a10, null, _checksum_decorators, { kind: "accessor", name: "checksum", static: false, private: false, access: { has: (obj) => "checksum" in obj, get: (obj) => obj.checksum, set: (obj, value) => {
+          __esDecorate5(_a12, null, _checksum_decorators, { kind: "accessor", name: "checksum", static: false, private: false, access: { has: (obj) => "checksum" in obj, get: (obj) => obj.checksum, set: (obj, value) => {
             obj.checksum = value;
           } }, metadata: _metadata }, _checksum_initializers, _checksum_extraInitializers);
-          __esDecorate5(_a10, null, _timestamp_decorators, { kind: "accessor", name: "timestamp", static: false, private: false, access: { has: (obj) => "timestamp" in obj, get: (obj) => obj.timestamp, set: (obj, value) => {
+          __esDecorate5(_a12, null, _timestamp_decorators, { kind: "accessor", name: "timestamp", static: false, private: false, access: { has: (obj) => "timestamp" in obj, get: (obj) => obj.timestamp, set: (obj, value) => {
             obj.timestamp = value;
           } }, metadata: _metadata }, _timestamp_initializers, _timestamp_extraInitializers);
-          __esDecorate5(_a10, null, _previous_offset_decorators, { kind: "accessor", name: "previous_offset", static: false, private: false, access: { has: (obj) => "previous_offset" in obj, get: (obj) => obj.previous_offset, set: (obj, value) => {
+          __esDecorate5(_a12, null, _previous_offset_decorators, { kind: "accessor", name: "previous_offset", static: false, private: false, access: { has: (obj) => "previous_offset" in obj, get: (obj) => obj.previous_offset, set: (obj, value) => {
             obj.previous_offset = value;
           } }, metadata: _metadata }, _previous_offset_initializers, _previous_offset_extraInitializers);
-          __esDecorate5(_a10, null, _items_decorators, { kind: "accessor", name: "items", static: false, private: false, access: { has: (obj) => "items" in obj, get: (obj) => obj.items, set: (obj, value) => {
+          __esDecorate5(_a12, null, _items_decorators, { kind: "accessor", name: "items", static: false, private: false, access: { has: (obj) => "items" in obj, get: (obj) => obj.items, set: (obj, value) => {
             obj.items = value;
           } }, metadata: _metadata }, _items_initializers, _items_extraInitializers);
-          __esDecorate5(_a10, null, _locked_decorators, { kind: "accessor", name: "locked", static: false, private: false, access: { has: (obj) => "locked" in obj, get: (obj) => obj.locked, set: (obj, value) => {
+          __esDecorate5(_a12, null, _locked_decorators, { kind: "accessor", name: "locked", static: false, private: false, access: { has: (obj) => "locked" in obj, get: (obj) => obj.locked, set: (obj, value) => {
             obj.locked = value;
           } }, metadata: _metadata }, _locked_initializers, _locked_extraInitializers);
           __esDecorate5(null, _classDescriptor = { value: _classThis }, _classDecorators, { kind: "class", name: _classThis.name, metadata: _metadata }, null, _classExtraInitializers);
           MetadataBlock2 = _classThis = _classDescriptor.value;
           if (_metadata) Object.defineProperty(_classThis, Symbol.metadata, { enumerable: true, configurable: true, writable: true, value: _metadata });
-        })(), __publicField(_a10, "name", "MetadataBlock"), __publicField(_a10, "lockIndex"), __runInitializers5(_classThis, _classExtraInitializers), _a10);
+        })(), __publicField(_a12, "name", "MetadataBlock"), __publicField(_a12, "lockIndex"), __runInitializers5(_classThis, _classExtraInitializers), _a12);
         return MetadataBlock2 = _classThis;
       })();
       Object.assign(MetadataBlock, { lockIndex: offsetof(MetadataBlock, "locked") / Int32Array.BYTES_PER_ELEMENT });
       sb_magic = 1651715706;
       kUsedBytes = 2;
       SuperBlock = (() => {
-        var _a10, _checksum_accessor_storage, _magic_accessor_storage, _version_accessor_storage, _inode_format_accessor_storage, _flags_accessor_storage, _used_bytes_accessor_storage, _total_bytes_accessor_storage, _uuid_accessor_storage, _metadata_block_size_accessor_storage, _metadata_offset__accessor_storage, _metadata_offset_accessor_storage, _label_accessor_storage, __padding_accessor_storage;
-        var _a9, _b3, _c3, _d3, _e3, _f2, _g2, _h, _j, _k;
+        var _a12, _checksum_accessor_storage, _magic_accessor_storage, _version_accessor_storage, _inode_format_accessor_storage, _flags_accessor_storage, _used_bytes_accessor_storage, _total_bytes_accessor_storage, _uuid_accessor_storage, _metadata_block_size_accessor_storage, _metadata_offset__accessor_storage, _metadata_offset_accessor_storage, _label_accessor_storage, __padding_accessor_storage;
+        var _a11, _b3, _c3, _d3, _e3, _f2, _g2, _h, _j, _k;
         let _classDecorators = [struct.packed()];
         let _classDescriptor;
         let _classExtraInitializers = [];
@@ -19595,7 +19595,7 @@ var ZenFSConfigUI = (() => {
         let __padding_decorators;
         let __padding_initializers = [];
         let __padding_extraInitializers = [];
-        var SuperBlock2 = (_a10 = class extends _classSuper {
+        var SuperBlock2 = (_a12 = class extends _classSuper {
           constructor(...args) {
             super(...args);
             __privateAdd(this, _checksum_accessor_storage, __runInitializers5(this, _checksum_initializers, void 0));
@@ -19796,9 +19796,9 @@ var ZenFSConfigUI = (() => {
             }
             return true;
           }
-        }, _checksum_accessor_storage = new WeakMap(), _magic_accessor_storage = new WeakMap(), _version_accessor_storage = new WeakMap(), _inode_format_accessor_storage = new WeakMap(), _flags_accessor_storage = new WeakMap(), _used_bytes_accessor_storage = new WeakMap(), _total_bytes_accessor_storage = new WeakMap(), _uuid_accessor_storage = new WeakMap(), _metadata_block_size_accessor_storage = new WeakMap(), _metadata_offset__accessor_storage = new WeakMap(), _metadata_offset_accessor_storage = new WeakMap(), _label_accessor_storage = new WeakMap(), __padding_accessor_storage = new WeakMap(), _classThis = _a10, (() => {
+        }, _checksum_accessor_storage = new WeakMap(), _magic_accessor_storage = new WeakMap(), _version_accessor_storage = new WeakMap(), _inode_format_accessor_storage = new WeakMap(), _flags_accessor_storage = new WeakMap(), _used_bytes_accessor_storage = new WeakMap(), _total_bytes_accessor_storage = new WeakMap(), _uuid_accessor_storage = new WeakMap(), _metadata_block_size_accessor_storage = new WeakMap(), _metadata_offset__accessor_storage = new WeakMap(), _metadata_offset_accessor_storage = new WeakMap(), _label_accessor_storage = new WeakMap(), __padding_accessor_storage = new WeakMap(), _classThis = _a12, (() => {
           const _metadata = typeof Symbol === "function" && Symbol.metadata ? Object.create(_classSuper[Symbol.metadata] ?? null) : void 0;
-          _checksum_decorators = [(_a9 = types2).uint32.bind(_a9)];
+          _checksum_decorators = [(_a11 = types2).uint32.bind(_a11)];
           _magic_decorators = [(_b3 = types2).uint32.bind(_b3)];
           _version_decorators = [(_c3 = types2).uint16.bind(_c3)];
           _inode_format_decorators = [(_d3 = types2).uint16.bind(_d3)];
@@ -19811,49 +19811,49 @@ var ZenFSConfigUI = (() => {
           _metadata_offset_decorators = [(_k = types2).uint32.bind(_k)];
           _label_decorators = [types2.char(64)];
           __padding_decorators = [types2.char(132)];
-          __esDecorate5(_a10, null, _checksum_decorators, { kind: "accessor", name: "checksum", static: false, private: false, access: { has: (obj) => "checksum" in obj, get: (obj) => obj.checksum, set: (obj, value) => {
+          __esDecorate5(_a12, null, _checksum_decorators, { kind: "accessor", name: "checksum", static: false, private: false, access: { has: (obj) => "checksum" in obj, get: (obj) => obj.checksum, set: (obj, value) => {
             obj.checksum = value;
           } }, metadata: _metadata }, _checksum_initializers, _checksum_extraInitializers);
-          __esDecorate5(_a10, null, _magic_decorators, { kind: "accessor", name: "magic", static: false, private: false, access: { has: (obj) => "magic" in obj, get: (obj) => obj.magic, set: (obj, value) => {
+          __esDecorate5(_a12, null, _magic_decorators, { kind: "accessor", name: "magic", static: false, private: false, access: { has: (obj) => "magic" in obj, get: (obj) => obj.magic, set: (obj, value) => {
             obj.magic = value;
           } }, metadata: _metadata }, _magic_initializers, _magic_extraInitializers);
-          __esDecorate5(_a10, null, _version_decorators, { kind: "accessor", name: "version", static: false, private: false, access: { has: (obj) => "version" in obj, get: (obj) => obj.version, set: (obj, value) => {
+          __esDecorate5(_a12, null, _version_decorators, { kind: "accessor", name: "version", static: false, private: false, access: { has: (obj) => "version" in obj, get: (obj) => obj.version, set: (obj, value) => {
             obj.version = value;
           } }, metadata: _metadata }, _version_initializers, _version_extraInitializers);
-          __esDecorate5(_a10, null, _inode_format_decorators, { kind: "accessor", name: "inode_format", static: false, private: false, access: { has: (obj) => "inode_format" in obj, get: (obj) => obj.inode_format, set: (obj, value) => {
+          __esDecorate5(_a12, null, _inode_format_decorators, { kind: "accessor", name: "inode_format", static: false, private: false, access: { has: (obj) => "inode_format" in obj, get: (obj) => obj.inode_format, set: (obj, value) => {
             obj.inode_format = value;
           } }, metadata: _metadata }, _inode_format_initializers, _inode_format_extraInitializers);
-          __esDecorate5(_a10, null, _flags_decorators, { kind: "accessor", name: "flags", static: false, private: false, access: { has: (obj) => "flags" in obj, get: (obj) => obj.flags, set: (obj, value) => {
+          __esDecorate5(_a12, null, _flags_decorators, { kind: "accessor", name: "flags", static: false, private: false, access: { has: (obj) => "flags" in obj, get: (obj) => obj.flags, set: (obj, value) => {
             obj.flags = value;
           } }, metadata: _metadata }, _flags_initializers, _flags_extraInitializers);
-          __esDecorate5(_a10, null, _used_bytes_decorators, { kind: "accessor", name: "used_bytes", static: false, private: false, access: { has: (obj) => "used_bytes" in obj, get: (obj) => obj.used_bytes, set: (obj, value) => {
+          __esDecorate5(_a12, null, _used_bytes_decorators, { kind: "accessor", name: "used_bytes", static: false, private: false, access: { has: (obj) => "used_bytes" in obj, get: (obj) => obj.used_bytes, set: (obj, value) => {
             obj.used_bytes = value;
           } }, metadata: _metadata }, _used_bytes_initializers, _used_bytes_extraInitializers);
-          __esDecorate5(_a10, null, _total_bytes_decorators, { kind: "accessor", name: "total_bytes", static: false, private: false, access: { has: (obj) => "total_bytes" in obj, get: (obj) => obj.total_bytes, set: (obj, value) => {
+          __esDecorate5(_a12, null, _total_bytes_decorators, { kind: "accessor", name: "total_bytes", static: false, private: false, access: { has: (obj) => "total_bytes" in obj, get: (obj) => obj.total_bytes, set: (obj, value) => {
             obj.total_bytes = value;
           } }, metadata: _metadata }, _total_bytes_initializers, _total_bytes_extraInitializers);
-          __esDecorate5(_a10, null, _uuid_decorators, { kind: "accessor", name: "uuid", static: false, private: false, access: { has: (obj) => "uuid" in obj, get: (obj) => obj.uuid, set: (obj, value) => {
+          __esDecorate5(_a12, null, _uuid_decorators, { kind: "accessor", name: "uuid", static: false, private: false, access: { has: (obj) => "uuid" in obj, get: (obj) => obj.uuid, set: (obj, value) => {
             obj.uuid = value;
           } }, metadata: _metadata }, _uuid_initializers, _uuid_extraInitializers);
-          __esDecorate5(_a10, null, _metadata_block_size_decorators, { kind: "accessor", name: "metadata_block_size", static: false, private: false, access: { has: (obj) => "metadata_block_size" in obj, get: (obj) => obj.metadata_block_size, set: (obj, value) => {
+          __esDecorate5(_a12, null, _metadata_block_size_decorators, { kind: "accessor", name: "metadata_block_size", static: false, private: false, access: { has: (obj) => "metadata_block_size" in obj, get: (obj) => obj.metadata_block_size, set: (obj, value) => {
             obj.metadata_block_size = value;
           } }, metadata: _metadata }, _metadata_block_size_initializers, _metadata_block_size_extraInitializers);
-          __esDecorate5(_a10, null, _metadata_offset__decorators, { kind: "accessor", name: "metadata_offset_", static: false, private: false, access: { has: (obj) => "metadata_offset_" in obj, get: (obj) => obj.metadata_offset_, set: (obj, value) => {
+          __esDecorate5(_a12, null, _metadata_offset__decorators, { kind: "accessor", name: "metadata_offset_", static: false, private: false, access: { has: (obj) => "metadata_offset_" in obj, get: (obj) => obj.metadata_offset_, set: (obj, value) => {
             obj.metadata_offset_ = value;
           } }, metadata: _metadata }, _metadata_offset__initializers, _metadata_offset__extraInitializers);
-          __esDecorate5(_a10, null, _metadata_offset_decorators, { kind: "accessor", name: "metadata_offset", static: false, private: false, access: { has: (obj) => "metadata_offset" in obj, get: (obj) => obj.metadata_offset, set: (obj, value) => {
+          __esDecorate5(_a12, null, _metadata_offset_decorators, { kind: "accessor", name: "metadata_offset", static: false, private: false, access: { has: (obj) => "metadata_offset" in obj, get: (obj) => obj.metadata_offset, set: (obj, value) => {
             obj.metadata_offset = value;
           } }, metadata: _metadata }, _metadata_offset_initializers, _metadata_offset_extraInitializers);
-          __esDecorate5(_a10, null, _label_decorators, { kind: "accessor", name: "label", static: false, private: false, access: { has: (obj) => "label" in obj, get: (obj) => obj.label, set: (obj, value) => {
+          __esDecorate5(_a12, null, _label_decorators, { kind: "accessor", name: "label", static: false, private: false, access: { has: (obj) => "label" in obj, get: (obj) => obj.label, set: (obj, value) => {
             obj.label = value;
           } }, metadata: _metadata }, _label_initializers, _label_extraInitializers);
-          __esDecorate5(_a10, null, __padding_decorators, { kind: "accessor", name: "_padding", static: false, private: false, access: { has: (obj) => "_padding" in obj, get: (obj) => obj._padding, set: (obj, value) => {
+          __esDecorate5(_a12, null, __padding_decorators, { kind: "accessor", name: "_padding", static: false, private: false, access: { has: (obj) => "_padding" in obj, get: (obj) => obj._padding, set: (obj, value) => {
             obj._padding = value;
           } }, metadata: _metadata }, __padding_initializers, __padding_extraInitializers);
           __esDecorate5(null, _classDescriptor = { value: _classThis }, _classDecorators, { kind: "class", name: _classThis.name, metadata: _metadata }, null, _classExtraInitializers);
           SuperBlock2 = _classThis = _classDescriptor.value;
           if (_metadata) Object.defineProperty(_classThis, Symbol.metadata, { enumerable: true, configurable: true, writable: true, value: _metadata });
-        })(), __publicField(_a10, "name", "SuperBlock"), __runInitializers5(_classThis, _classExtraInitializers), _a10);
+        })(), __publicField(_a12, "name", "SuperBlock"), __runInitializers5(_classThis, _classExtraInitializers), _a12);
         return SuperBlock2 = _classThis;
       })();
       kMetadataOffset = offsetof(SuperBlock, "metadata_offset") / Uint32Array.BYTES_PER_ELEMENT;
@@ -20451,11 +20451,11 @@ var ZenFSConfigUI = (() => {
         }
         /** @hidden @internal */
         static _withContext(ctx) {
-          var _a9, _b3;
+          var _a11, _b3;
           assertContext(ctx);
-          class $Utf8Stream extends (_b3 = _Utf8Stream, _a9 = kUtf8StreamFS, _b3) {
+          class $Utf8Stream extends (_b3 = _Utf8Stream, _a11 = kUtf8StreamFS, _b3) {
           }
-          __publicField($Utf8Stream, _a9, bindFunctions(_utf8StreamFS, ctx));
+          __publicField($Utf8Stream, _a11, bindFunctions(_utf8StreamFS, ctx));
           return $Utf8Stream;
         }
         /**
@@ -26685,7 +26685,14 @@ var ZenFSConfigUI = (() => {
   var VERSIONS_DIR = `${META_DIR}/versions`;
   var CONFLICTS_DIR = `${META_DIR}/conflicts`;
   var LEGACY_CONFLICTS_DIR = `${META_DIR}/.conflicts`;
+  var LEGACY_APP_DATA_GROUPS_DIR = `${META_DIR}/app-data-groups`;
   var CONFIG_DIR = "/.config";
+  function isDeletableLegacyMetaPath(path) {
+    for (const dir of [LEGACY_TOMBSTONES_DIR, LEGACY_CONFLICTS_DIR, LEGACY_APP_DATA_GROUPS_DIR]) {
+      if (path === dir || path.startsWith(`${dir}/`)) return true;
+    }
+    return false;
+  }
   var DATA_GROUP_DEFAULT_FEATURES = {
     tombstones: true,
     versions: false,
@@ -27339,12 +27346,9 @@ var ZenFSConfigUI = (() => {
     const parts = [
       `kind=${identity.kind ?? "?"}`,
       `id=${identity.id ?? "?"}`,
-      `\u5B9E\u4F8B ID=${identity.instanceId ? shortInstanceId(identity.instanceId) : "\uFF08\u65E0\uFF09"}`
+      `\u5B9E\u4F8B ID=${identity.instanceId ?? "\uFF08\u65E0\uFF09"}`
     ];
     return parts.join(" \xB7 ");
-  }
-  function shortInstanceId(instanceId) {
-    return `${instanceId.slice(0, 8)}\u2026`;
   }
   function snapshotOf(descriptor) {
     if (!descriptor) return null;
@@ -27741,7 +27745,6 @@ var ZenFSConfigUI = (() => {
   var BACKENDS_DIR = META_BACKENDS_DIR;
   var LEGACY_BACKENDS_DIR = `${CONFIG_DIR}/backends`;
   var APP_DATA_GROUPS_DIR = `${CONFIG_DIR}/app-data-groups`;
-  var LEGACY_APP_DATA_GROUPS_DIR = `${META_DIR}/app-data-groups`;
   var CONFIG_SYNC_GROUP_FILE = `${CONFIG_DIR}/config-sync-group.json`;
   var LEGACY_CONFIG_SYNC_GROUP_FILE = `${META_DIR}/config-sync-group.json`;
   var GROUP_NAME_MAX_LENGTH = 40;
@@ -27856,7 +27859,8 @@ var ZenFSConfigUI = (() => {
     }
     return { kept: Array.from(byKey.values()), removed };
   }
-  var ConfigRepo = class {
+  var _a9;
+  var ConfigRepo = (_a9 = class {
     constructor(appId, nodeId, primaryBackendId, cachedFS, serializer, onConflict, pollIntervalMs, cacheOptions) {
       __publicField(this, "appId");
       __publicField(this, "nodeId");
@@ -27885,15 +27889,7 @@ var ZenFSConfigUI = (() => {
       __publicField(this, "pollIntervalMs");
       /** Tombstone cache — avoids redundant reads within a single flush() cycle. */
       __publicField(this, "tombstoneCache", null);
-      /**
-       * 墓碑存在期间被排除在同步之外的路径。
-       *
-       * 远端副本可能仍残留被删路径（哪怕只剩 `.keep` / `.keep.mtime` 占位）。
-       * 若同步照常进行，这类残留会被当成"远端新增"再拉回本地，造成空壳复活。
-       * 这些路径改由 processTombstones 主动删除，直到所有副本确认不存在、
-       * 墓碑被 GC 之后才恢复同步。
-       */
-      __publicField(this, "tombstoneExcludePrefixes", []);
+      __publicField(this, "tombstoneExcludePrefixes", [..._a9.PERMANENT_SYNC_EXCLUSIONS]);
       __publicField(this, "syncFilter", { excludePrefixes: this.tombstoneExcludePrefixes });
       /**
        * 本轮 processTombstones 中，各副本对墓碑路径"已确认不存在"的结果。
@@ -28203,7 +28199,7 @@ var ZenFSConfigUI = (() => {
      * `filter.excludePrefixes`），所以这里原地更新即可生效。
      */
     refreshSyncExclusions(tombstones) {
-      this.tombstoneExcludePrefixes.length = 0;
+      this.tombstoneExcludePrefixes.length = _a9.PERMANENT_SYNC_EXCLUSIONS.length;
       const add = (target) => {
         this.tombstoneExcludePrefixes.push(target, `${target}/`);
       };
@@ -29277,22 +29273,7 @@ var ZenFSConfigUI = (() => {
       const items = [...fresh.items];
       const corruptFiles = [...fresh.corruptFiles];
       for (const corruptPath of corruptFiles) {
-        for (const [, replica] of this.replicaBackends) {
-          try {
-            await replica.instance.unlink(corruptPath);
-          } catch {
-          }
-          await this.unlinkVersionSidecar(replica.instance, corruptPath);
-        }
-        try {
-          await this.deleteFile(corruptPath);
-        } catch {
-          try {
-            await this.cachedFS.unlink(corruptPath);
-          } catch {
-          }
-          await this.unlinkVersionSidecar(this.cachedFS, corruptPath);
-        }
+        log5.warn(`[ConfigRepo] readAllBackendDescriptors: ignoring unreadable descriptor ${corruptPath}`);
       }
       const seen = /* @__PURE__ */ new Map();
       const duplicates = [];
@@ -29312,28 +29293,8 @@ var ZenFSConfigUI = (() => {
       }
       if (duplicates.length > 0) {
         log5.log(
-          `[ConfigRepo] readAllBackendDescriptors: removing ${duplicates.length} duplicate(s): ${duplicates.join(", ")}`
+          `[ConfigRepo] readAllBackendDescriptors: ignoring ${duplicates.length} duplicate descriptor(s) (kept on disk): ${duplicates.join(", ")}`
         );
-        for (const dupId of duplicates) {
-          for (const descPath of [this.backendFilePath(dupId), this.legacyBackendFilePath(dupId)]) {
-            for (const [, replica] of this.replicaBackends) {
-              try {
-                await replica.instance.unlink(descPath);
-              } catch {
-              }
-              await this.unlinkVersionSidecar(replica.instance, descPath);
-            }
-            try {
-              await this.deleteFile(descPath);
-            } catch {
-              try {
-                await this.cachedFS.unlink(descPath);
-              } catch {
-              }
-              await this.unlinkVersionSidecar(this.cachedFS, descPath);
-            }
-          }
-        }
       }
       const result = Array.from(seen.values()).map((i) => i.desc);
       this.backendDescriptorCache = result;
@@ -29694,11 +29655,39 @@ var ZenFSConfigUI = (() => {
     getGroupInstanceId() {
       return this.instanceId;
     }
-    /** 配置组的身份候选：本地描述符 + 已注册后端根上的值。 */
+    /** 配置组的身份候选：本地描述符 + 已注册后端根上的值（只读缓存）。 */
     getIdentityCandidates() {
       if (this.identityCandidates.length > 0) return this.identityCandidates.map((c) => ({ ...c }));
       if (!this.instanceId) return [];
       return [{ source: "local", instanceId: this.instanceId, rootCount: 1, kind: "config", id: CONFIG_GROUP_ID }];
+    }
+    /**
+     * 现场回读各根，重算候选并填充缓存。
+     *
+     * 缓存只在「初始化时本地没有身份」才被填充；本地已有身份时缓存是空的，
+     * 同步 getter 也就只剩一个本地值 —— 界面看不到「本地 6abe… vs 远端 5a52…」
+     * 这种真正需要拍板的分歧。所以给界面一个能主动回读的入口。
+     */
+    async getIdentityCandidatesAsync() {
+      if (!this.instanceId) return [];
+      const collected = await this.collectConfigIdentityCandidates("config", CONFIG_GROUP_ID);
+      if (!collected.candidates.some((c) => c.source === "local") && this.instanceId) {
+        collected.candidates.unshift({
+          source: "local",
+          instanceId: this.instanceId,
+          rootCount: 1,
+          kind: "config",
+          id: CONFIG_GROUP_ID
+        });
+      }
+      this.identityCandidates = collected.candidates;
+      this.configIdentityUnsettled = collected.distinct.length > 1;
+      if (this.configIdentityUnsettled) {
+        log5.warn(
+          `[ConfigRepo] identity candidates disagree (${collected.distinct.join(" / ")}) \u2014 left to the user to decide in the UI`
+        );
+      }
+      return this.identityCandidates.map((c) => ({ ...c }));
     }
     /** 候选是否互相矛盾（界面据此要求用户拍板）。 */
     isIdentityUnsettled() {
@@ -29873,10 +29862,9 @@ var ZenFSConfigUI = (() => {
         }
       }
       const bytes = new TextEncoder().encode(type);
-      for (const path of [GROUP_TYPE_FILE, LEGACY_GROUP_TYPE_FILE]) {
-        if (await this.safeExists(this.cachedFS, path)) continue;
-        await this.ensureDir(path);
-        await this.cachedFS.writeFile(path, bytes);
+      if (!await this.safeExists(this.cachedFS, GROUP_TYPE_FILE)) {
+        await this.ensureDir(GROUP_TYPE_FILE);
+        await this.cachedFS.writeFile(GROUP_TYPE_FILE, bytes);
       }
       const existingDescriptor = await readGroupDescriptor(this.cachedFS);
       if (!existingDescriptor) {
@@ -29915,6 +29903,14 @@ var ZenFSConfigUI = (() => {
         log5.log(`[ConfigRepo] assigned group instanceId ${this.instanceId} (kind=${existingDescriptor?.kind ?? "config"})`);
       }
       log5.log(`[ConfigRepo] group-type set to "${type}"`);
+      if (await this.safeExists(this.cachedFS, LEGACY_GROUP_TYPE_FILE)) {
+        try {
+          await this.cachedFS.unlink(LEGACY_GROUP_TYPE_FILE);
+          log5.log("[ConfigRepo] removed stale legacy .meta/group-type");
+        } catch (err2) {
+          log5.warn(`[ConfigRepo] failed to remove legacy .meta/group-type: ${err2.message}`);
+        }
+      }
     }
     /** Read the group-type marker. Returns null if not set (new path, then legacy). */
     async getGroupType() {
@@ -30318,8 +30314,26 @@ var ZenFSConfigUI = (() => {
         throw new Error("ConfigRepo has been disposed");
       }
     }
-  };
-  var AppDataGroupImpl = class {
+  }, /**
+   * 墓碑存在期间被排除在同步之外的路径。
+   *
+   * 远端副本可能仍残留被删路径（哪怕只剩 `.keep` / `.keep.mtime` 占位）。
+   * 若同步照常进行，这类残留会被当成"远端新增"再拉回本地，造成空壳复活。
+   * 这些路径改由 processTombstones 主动删除，直到所有副本确认不存在、
+   * 墓碑被 GC 之后才恢复同步。
+   */
+  /**
+   * 永不参与内容同步的元数据路径。
+   *
+   * `.meta/group.json` 是同步身份（kind/id/instanceId）的载体，只在身份流程里写：
+   * 建同步对时读它、认领/对齐时写它。一旦让普通内容同步（按 mtime 双向）
+   * 也去搬这个文件，身份就成了"谁最后写谁赢"——两台设备各持一个实例 ID 时会
+   * 互相覆盖，远端根的 instanceId 便会反复变化，且全程绕开 claim / 冲突判定。
+   * 所以这里固定排除，刷新墓碑排除表时也不得清掉。
+   */
+  __publicField(_a9, "PERMANENT_SYNC_EXCLUSIONS", [GROUP_DESCRIPTOR_FILE3]), _a9);
+  var _a10;
+  var AppDataGroupImpl = (_a10 = class {
     constructor(groupId, appId, backends, pollIntervalMs, parent, descriptor = {}) {
       __publicField(this, "groupId");
       __publicField(this, "appId");
@@ -30337,14 +30351,7 @@ var ZenFSConfigUI = (() => {
       __publicField(this, "versions");
       __publicField(this, "conflicts");
       __publicField(this, "postDeleteTimer");
-      /**
-       * 墓碑路径的同步排除表（与配置组同一套机制）。
-       *
-       * 保留期内的墓碑路径不参与同步：否则副本上的残留会被当作"远端内容"逐文件
-       * 拉回本地，把已删除的目录复活。数组与各同步对共享同一实例（zen-fs-sync
-       * 每次检测时实时读取 `filter.excludePrefixes`），原地更新即可生效。
-       */
-      __publicField(this, "tombstoneExcludePrefixes", [...CONFIG_ONLY_PREFIXES]);
+      __publicField(this, "tombstoneExcludePrefixes", [..._a10.PERMANENT_SYNC_EXCLUSIONS]);
       __publicField(this, "syncFilter", { excludePrefixes: this.tombstoneExcludePrefixes });
       __publicField(this, "parent");
       __publicField(this, "_backends");
@@ -30889,10 +30896,8 @@ var ZenFSConfigUI = (() => {
         hiddenPrefixes: [CONFIG_DIR],
         readOnlyPrefixes: [
           TOMBSTONES_DIR,
-          LEGACY_TOMBSTONES_DIR,
           VERSIONS_DIR,
-          CONFLICTS_DIR,
-          LEGACY_CONFLICTS_DIR
+          CONFLICTS_DIR
         ],
         confirmPrefixes: [GROUP_DESCRIPTOR_FILE3],
         onWrite: async (path, data) => {
@@ -31077,8 +31082,7 @@ var ZenFSConfigUI = (() => {
      * 参与同步。注意**不能**为 `.keep` 占位排除父目录，否则真实数据会被一起挡掉。
      */
     refreshSyncExclusions(tombstones) {
-      this.tombstoneExcludePrefixes.length = 0;
-      this.tombstoneExcludePrefixes.push(...CONFIG_ONLY_PREFIXES);
+      this.tombstoneExcludePrefixes.length = _a10.PERMANENT_SYNC_EXCLUSIONS.length;
       for (const tombstone of tombstones) {
         if (!tombstone.path) continue;
         this.tombstoneExcludePrefixes.push(tombstone.path, `${tombstone.path}/`);
@@ -31137,7 +31141,7 @@ var ZenFSConfigUI = (() => {
     async deleteFile(path) {
       if (this.disposed) throw new Error("DataSyncGroup has been disposed");
       const normalized = path.startsWith("/") ? path : `/${path}`;
-      if (normalized === META_DIR || normalized === CONFIG_DIR || normalized.startsWith(`${META_DIR}/`) || normalized.startsWith(`${CONFIG_DIR}/`)) {
+      if (normalized === CONFIG_DIR || normalized.startsWith(`${CONFIG_DIR}/`) || (normalized === META_DIR || normalized.startsWith(`${META_DIR}/`)) && !isDeletableLegacyMetaPath(normalized)) {
         throw new Error(`Cannot delete metadata path "${normalized}"`);
       }
       if (await isDirectoryPath(this.localFS, normalized)) {
@@ -31323,7 +31327,17 @@ var ZenFSConfigUI = (() => {
       }
       this.dataBackends.clear();
     }
-  };
+  }, /**
+   * 墓碑路径的同步排除表（与配置组同一套机制）。
+   *
+   * 保留期内的墓碑路径不参与同步：否则副本上的残留会被当作"远端内容"逐文件
+   * 拉回本地，把已删除的目录复活。数组与各同步对共享同一实例（zen-fs-sync
+   * 每次检测时实时读取 `filter.excludePrefixes`），原地更新即可生效。
+   *
+   * 除墓碑外还固定排除 `.meta/group.json`：它是本组的同步身份，只允许身份流程
+   * 写入；让普通内容同步搬它，等于让"谁最后写谁赢"决定组身份。
+   */
+  __publicField(_a10, "PERMANENT_SYNC_EXCLUSIONS", [...CONFIG_ONLY_PREFIXES, GROUP_DESCRIPTOR_FILE3]), _a10);
   function toUint8Array22(raw) {
     if (raw instanceof ArrayBuffer) return new Uint8Array(raw);
     if (raw instanceof Uint8Array) return raw;
@@ -31378,25 +31392,36 @@ var ZenFSConfigUI = (() => {
         log5.error(`[createConfigRepo] Failed to ensure /.meta/:`, err2.message);
       }
     }
+    const declaredIdentity = await readGroupDescriptor(primaryInstance);
+    if (declaredIdentity?.kind === "data") {
+      log5.warn(
+        `[createConfigRepo] local primary carries a data-group descriptor (id=${declaredIdentity.id ?? "?"}) \u2014 rewriting it back to kind=config (its .meta/group.json was overwritten by sync)`
+      );
+      await writeGroupDescriptor(primaryInstance, {
+        schemaVersion: 2,
+        kind: "config",
+        id: CONFIG_GROUP_ID,
+        // 只纠正 kind/id，instanceId 原样保留：换身份必须由用户拍板，
+        // 初始化阶段不得顺手派生新 UUID（那会给远端根引入第三个值）。
+        ...isValidGroupInstanceId(declaredIdentity.instanceId) ? { instanceId: declaredIdentity.instanceId } : {},
+        ...declaredIdentity.name ? { name: declaredIdentity.name } : {},
+        features: CONFIG_GROUP_FEATURES
+      });
+    }
     try {
       const groupTypeBytes = new TextEncoder().encode("config-sync");
-      for (const path of [`${CONFIG_DIR}/group-type`, `${META_DIR}/group-type`]) {
-        try {
-          await primaryInstance.readFile(path);
-        } catch {
-          await ensureParentDir2(primaryInstance, path);
-          await primaryInstance.writeFile(path, groupTypeBytes);
-          log5.log(`[createConfigRepo] group-type set to "config-sync" at ${path}`);
-        }
+      const markerPath = `${CONFIG_DIR}/group-type`;
+      try {
+        await primaryInstance.readFile(markerPath);
+      } catch {
+        await ensureParentDir2(primaryInstance, markerPath);
+        await primaryInstance.writeFile(markerPath, groupTypeBytes);
+        log5.log(`[createConfigRepo] group-type set to "config-sync" at ${markerPath}`);
       }
-      if (!await readGroupDescriptor(primaryInstance)) {
-        await writeGroupDescriptor(primaryInstance, {
-          schemaVersion: 2,
-          kind: "config",
-          id: CONFIG_GROUP_ID,
-          instanceId: newGroupInstanceId(),
-          features: CONFIG_GROUP_FEATURES
-        });
+      try {
+        await primaryInstance.unlink(`${META_DIR}/group-type`);
+        log5.log("[createConfigRepo] removed stale legacy .meta/group-type");
+      } catch {
       }
     } catch (err2) {
       log5.warn(`[createConfigRepo] Failed to write group metadata:`, err2.message);
@@ -31644,12 +31669,20 @@ var ZenFSConfigUI = (() => {
     } finally {
     }
     try {
+      if (remote?.kind === "data") {
+        log6("detectGroupType: .meta/group.json declares kind=data \u2192 data-sync");
+        return { groupType: "data-sync", remote };
+      }
+      if (remote?.kind === "config") {
+        log6("detectGroupType: .meta/group.json declares kind=config \u2192 config-sync");
+        return { groupType: "config-sync", remote };
+      }
       for (const path of [GROUP_TYPE_FILE2, LEGACY_GROUP_TYPE_FILE2]) {
         try {
           const raw = await tempBackend.readFile(path, "utf-8");
           const groupType = raw.trim();
           if (groupType === "config-sync" || groupType === "data-sync") {
-            log6(`detectGroupType: detected "${groupType}" at ${path}`);
+            log6(`detectGroupType: detected "${groupType}" at ${path} (no descriptor)`);
             return { groupType, remote };
           }
           log6(`detectGroupType: unknown group-type value "${groupType}" at ${path}, treating as null`);
@@ -31657,7 +31690,7 @@ var ZenFSConfigUI = (() => {
         } catch {
         }
       }
-      log6(`detectGroupType: no group-type file found (new backend)`);
+      log6(`detectGroupType: no group-type file and no descriptor kind (new backend)`);
       return { groupType: null, remote };
     } finally {
       if (tempBackend?.dispose) {
@@ -32675,7 +32708,7 @@ var ZenFSConfigUI = (() => {
   function formatBackendFailureSummary(failed) {
     return failed.length === 0 ? "" : ` \xB7 ${failed.length} \u4E2A\u540E\u7AEF\u672A\u5EFA\u7ACB\u540C\u6B65\u5BF9`;
   }
-  function shortInstanceId2(instanceId) {
+  function shortInstanceId(instanceId) {
     if (!instanceId) return "\uFF08\u65E0\uFF09";
     return instanceId.length > 8 ? `${instanceId.slice(0, 8)}\u2026` : instanceId;
   }
@@ -32736,7 +32769,7 @@ var ZenFSConfigUI = (() => {
     }
     // ── Version logging ──────────────────────────────────────────────────
     logVersion() {
-      const uiVersion = true ? "0.3.35" : "dev";
+      const uiVersion = true ? "0.3.36" : "dev";
       console.log(
         `%c[zen-fs-config-ui] v${uiVersion}%c (appId=${this.props.appId})`,
         "color:#2563eb;font-weight:bold",
@@ -33750,7 +33783,7 @@ var ZenFSConfigUI = (() => {
         });
         rowBox.appendChild(el("div", {
           style: "font-size:12px;color:#78350f;flex:1 1 260px;line-height:1.6"
-        }, `${shortInstanceId2(value)} \xB7 \u6765\u81EA ${owners.map((c) => c.source === "remote" ? `\u8FDC\u7AEF\u6839 ${c.backendId}` : c.source === "bootstrap" ? "\u5F15\u5BFC\u526F\u672C" : "\u672C\u5730").join("\u3001")}`));
+        }, `${shortInstanceId(value)} \xB7 \u6765\u81EA ${owners.map((c) => c.source === "remote" ? `\u8FDC\u7AEF\u6839 ${c.backendId}` : c.source === "bootstrap" ? "\u5F15\u5BFC\u526F\u672C" : "\u672C\u5730").join("\u3001")}`));
         const adoptLocal = el("button", {
           className: "zfui-btn zfui-btn-secondary zfui-btn-sm",
           type: "button"
@@ -33780,7 +33813,7 @@ var ZenFSConfigUI = (() => {
      */
     async handleSetInstanceId(spec, instanceId, rewriteRoots, candidates) {
       const roots = candidates.filter((c) => c.source === "remote" && c.backendId);
-      const changedRoots = rewriteRoots ? roots.filter((r) => r.instanceId !== instanceId).map((r) => `\xB7 \u8FDC\u7AEF\u6839 ${r.backendId}\uFF08${shortInstanceId2(r.instanceId)} \u2192 ${shortInstanceId2(instanceId)}\uFF09`) : [];
+      const changedRoots = rewriteRoots ? roots.filter((r) => r.instanceId !== instanceId).map((r) => `\xB7 \u8FDC\u7AEF\u6839 ${r.backendId}\uFF08${shortInstanceId(r.instanceId)} \u2192 ${shortInstanceId(instanceId)}\uFF09`) : [];
       const lines = [
         `\u7EC4\uFF1A${spec.kind === "config" ? "\u914D\u7F6E\u7EC4" : "\u6570\u636E\u7EC4"} ${spec.name || spec.id}\uFF08id=${spec.id}\uFF09`,
         `\u76EE\u6807\u5B9E\u4F8B ID\uFF1A${instanceId}`,
@@ -33811,7 +33844,7 @@ var ZenFSConfigUI = (() => {
       if (result.roots.length > 0) {
         lines.push("\u8FDC\u7AEF\u6839\u7ED3\u679C\uFF1A");
         for (const r of result.roots) {
-          lines.push(r.ok ? `\u2714 ${r.backendId}${r.before && r.before !== instanceId ? `\uFF08${shortInstanceId2(r.before)} \u2192 ${shortInstanceId2(instanceId)}\uFF09` : "\uFF08\u5DF2\u662F\u8BE5\u503C\uFF0C\u672A\u91CD\u590D\u5199\uFF09"}` : `\u2718 ${r.backendId}\uFF1A${r.reason ?? "\u672A\u77E5\u539F\u56E0"}`);
+          lines.push(r.ok ? `\u2714 ${r.backendId}${r.before && r.before !== instanceId ? `\uFF08${shortInstanceId(r.before)} \u2192 ${shortInstanceId(instanceId)}\uFF09` : "\uFF08\u5DF2\u662F\u8BE5\u503C\uFF0C\u672A\u91CD\u590D\u5199\uFF09"}` : `\u2718 ${r.backendId}\uFF1A${r.reason ?? "\u672A\u77E5\u539F\u56E0"}`);
         }
       }
       return lines.join("\n");
