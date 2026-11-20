@@ -18669,6 +18669,7 @@ var ZenFSGitee = (() => {
     } catch {
     }
   }
+  var CREATE_RETRY_DELAYS_MS = [200, 600];
   var GiteeAPI = class _GiteeAPI {
     token;
     owner;
@@ -18793,7 +18794,7 @@ var ZenFSGitee = (() => {
       this.resolvedBranch = targetBranch;
       log2.log(`\u4ED3\u5E93\u4E3A\u7A7A\uFF0C\u5DF2\u81EA\u52A8\u521B\u5EFA\u521D\u59CB\u63D0\u4EA4\uFF08\u5206\u652F ${targetBranch}\uFF09`);
     }
-    async request(path, init2) {
+    async request(path, init2, opts) {
       const separator = path.includes("?") ? "&" : "?";
       const url = `${this.baseUrl}${path}${separator}access_token=${this.token}`;
       const mask = (value) => !value || !this.token ? value ?? "" : value.split(this.token).join("***");
@@ -18803,7 +18804,9 @@ var ZenFSGitee = (() => {
       if (!response.ok) {
         const text = await response.text().catch(() => "");
         const safeText = mask(text);
-        log2.log(`ERROR body: ${safeText.substring(0, 500)}`);
+        if (!(opts?.quiet404 && response.status === 404)) {
+          log2.log(`ERROR body: ${safeText.substring(0, 500)}`);
+        }
         throw new Error(`Gitee API ${response.status}: ${safeText}`);
       }
       if (response.status === 204) return void 0;
@@ -18888,11 +18891,28 @@ var ZenFSGitee = (() => {
     // -----------------------------------------------------------------------
     // Contents API (GET / POST / PUT / DELETE — all supported by Gitee)
     // -----------------------------------------------------------------------
-    async getContents(path) {
-      return this.request(`/repos/${this.owner}/${this.repo}/contents/${apiPath(path)}?ref=${this.currentBranch}`);
+    /**
+     * Read a path through the Contents API.
+     *
+     * Gitee answers **200 with an empty array** for a path that does not exist
+     * (it does not return 404 like GitHub). A path that exists as a file is a
+     * single object carrying `sha`; a directory is an array of entries. Callers
+     * that need "does this file exist" must therefore treat an array as
+     * "not a file" — see {@link getFileSha}.
+     */
+    async getContents(path, branch = this.currentBranch) {
+      return this.request(`/repos/${this.owner}/${this.repo}/contents/${apiPath(path)}?ref=${branch}`);
     }
-    async getRaw(path) {
-      return this.request(`/repos/${this.owner}/${this.repo}/raw/${apiPath(path)}?ref=${this.currentBranch}`);
+    /**
+     * Read a raw file. `quiet404` marks an existence probe (e.g. an `.mtime`
+     * sidecar check) where a 404 is an expected answer, not an error to log.
+     */
+    async getRaw(path, opts) {
+      return this.request(
+        `/repos/${this.owner}/${this.repo}/raw/${apiPath(path)}?ref=${this.currentBranch}`,
+        void 0,
+        opts
+      );
     }
     /**
      * Create a new file via Contents API. Returns the new blob SHA.
@@ -18904,15 +18924,16 @@ var ZenFSGitee = (() => {
       if (content.length === 0) {
         content = new TextEncoder().encode("\n");
       }
+      const postCreate = () => this.request(`/repos/${this.owner}/${this.repo}/contents/${apiPath(path)}?branch=${this.currentBranch}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          content: encodeBase64(content),
+          message
+        })
+      });
       try {
-        const data = await this.request(`/repos/${this.owner}/${this.repo}/contents/${apiPath(path)}?branch=${this.currentBranch}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            content: encodeBase64(content),
-            message
-          })
-        });
+        const data = await postCreate();
         return data?.content?.sha || "";
       } catch (err2) {
         const status = _GiteeAPI.httpStatus(err2);
@@ -18925,6 +18946,26 @@ var ZenFSGitee = (() => {
           throw new Error(
             `Gitee \u4ED3\u5E93 ${this.owner}/${this.repo} \u65E0\u6CD5\u5199\u5165\uFF1A\u5206\u652F '${this.currentBranch}' \u4E0D\u5B58\u5728\u6216\u4ED3\u5E93\u4E3A\u7A7A\uFF08\u81EA\u52A8\u521D\u59CB\u5316\u672A\u5B8C\u6210\uFF0C\u8BF7\u67E5\u770B\u540C\u6B65\u65E5\u5FD7\u4E2D\u7684\u521D\u59CB\u5316\u9519\u8BEF\uFF09`
           );
+        }
+        if (status === 400) {
+          const existingSha = await this.getFileSha(path);
+          if (existingSha) {
+            verboseLog(`createFile: ${path} already exists remotely, retrying as PUT update`);
+            return this.updateFile(path, content, existingSha, message);
+          }
+          let lastError = err2;
+          for (const delayMs of CREATE_RETRY_DELAYS_MS) {
+            await new Promise((resolve4) => setTimeout(resolve4, delayMs));
+            try {
+              const data = await postCreate();
+              verboseLog(`createFile: ${path} created on retry after ${delayMs}ms (400 on first attempt)`);
+              return data?.content?.sha || "";
+            } catch (retryErr) {
+              lastError = retryErr;
+              if (_GiteeAPI.httpStatus(retryErr) !== 400) throw retryErr;
+            }
+          }
+          throw lastError;
         }
         throw err2;
       }
@@ -18976,7 +19017,7 @@ var ZenFSGitee = (() => {
      */
     async deleteFile(path, sha, message) {
       try {
-        await this.request(`/repos/${this.owner}/${this.repo}/contents/${apiPath(path)}?branch=${this.branch}`, {
+        await this.request(`/repos/${this.owner}/${this.repo}/contents/${apiPath(path)}?branch=${this.currentBranch}`, {
           method: "DELETE",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -19001,17 +19042,27 @@ var ZenFSGitee = (() => {
             return;
           }
         }
-        const stillExists = await this.getContents(path).then(() => true).catch(() => false);
+        const stillExists = await this.request(
+          `/repos/${this.owner}/${this.repo}/contents/${apiPath(path)}?ref=${this.currentBranch}`,
+          void 0,
+          { quiet404: true }
+        ).then(() => true).catch(() => false);
         if (!stillExists) return;
         throw err2;
       }
     }
     /**
      * Get the current blob SHA of a file via the Contents API (GET).
+     *
+     * Returns `null` when the path is missing. Gitee signals "missing" with
+     * **200 + `[]`** (not 404), so an array response must be treated as
+     * "no file here" — otherwise `data?.sha` is `undefined` and a caller such
+     * as {@link createFile}'s 400 fallback cannot tell "exists" from "gone".
      */
-    async getFileSha(path) {
+    async getFileSha(path, branch = this.currentBranch) {
       try {
-        const data = await this.getContents(path);
+        const data = await this.getContents(path, branch);
+        if (Array.isArray(data)) return null;
         return data?.sha || null;
       } catch {
         return null;
@@ -19459,7 +19510,9 @@ var ZenFSGitee = (() => {
       if (inode) {
         inode.update({ mtimeMs: effectiveMtime, size: writeContent.length });
       }
-      const sha = this.shaCache.get(path);
+      const baseName = path.slice(path.lastIndexOf("/") + 1);
+      const isMetaPath = isMetadataSidecarToDelete(baseName);
+      const sha = this.shaCache.get(path) ?? (isMetaPath ? await this.ensureSha(path) : void 0);
       if (sha) {
         if (!(previous && bytesEqual(previous, writeContent))) {
           const newSha = await this.api.updateFile(path, writeContent, sha, `Update ${path}`);
@@ -19496,10 +19549,13 @@ var ZenFSGitee = (() => {
         inode.update({ mtimeMs: effectiveMtime, size: writeContent.length });
       }
       const sha = this.shaCache.get(path);
+      const baseName = path.slice(path.lastIndexOf("/") + 1);
+      const isMetaPath = isMetadataSidecarToDelete(baseName);
       this._queue(
         (async () => {
           if (sha && previous && bytesEqual(previous, writeContent)) return;
-          const newSha = sha ? await this.api.updateFile(path, writeContent, sha, `Update ${path}`) : await this.api.createFile(path, writeContent, `Create ${path}`);
+          const effectiveSha = sha ?? (isMetaPath ? await this.ensureSha(path) : void 0);
+          const newSha = effectiveSha ? await this.api.updateFile(path, writeContent, effectiveSha, `Update ${path}`) : await this.api.createFile(path, writeContent, `Create ${path}`);
           this.shaCache.set(path, newSha);
           this._persistSha(path, newSha);
         })().catch(() => {
@@ -19518,12 +19574,16 @@ var ZenFSGitee = (() => {
       }
       const sidecarPath = mtimePathFor(path);
       const sidecarContent = new TextEncoder().encode(String(mtimeMs));
-      const existingSidecarSha = this.shaCache.get(sidecarPath);
-      const newSha = existingSidecarSha ? await this.api.updateFile(sidecarPath, sidecarContent, existingSidecarSha, `Update sidecar for ${path}`) : await this.api.createFile(sidecarPath, sidecarContent, `Create sidecar for ${path}`);
-      this.shaCache.set(sidecarPath, newSha);
-      this._persistSha(sidecarPath, newSha);
-      this.contentCache.set(sidecarPath, sidecarContent);
-      this._persistContent(sidecarPath, sidecarContent);
+      const cachedSidecarSha = this.shaCache.get(sidecarPath);
+      const cachedSidecarContent = this.contentCache.get(sidecarPath);
+      if (!(cachedSidecarSha && cachedSidecarContent && bytesEqual(cachedSidecarContent, sidecarContent))) {
+        const existingSidecarSha = cachedSidecarSha ?? await this.ensureSha(sidecarPath);
+        const newSha = existingSidecarSha ? await this.api.updateFile(sidecarPath, sidecarContent, existingSidecarSha, `Update sidecar for ${path}`) : await this.api.createFile(sidecarPath, sidecarContent, `Create sidecar for ${path}`);
+        this.shaCache.set(sidecarPath, newSha);
+        this._persistSha(sidecarPath, newSha);
+        this.contentCache.set(sidecarPath, sidecarContent);
+        this._persistContent(sidecarPath, sidecarContent);
+      }
       this.noSidecarCache.delete(path);
       const dataSha = this.shaCache.get(path);
       if (dataSha) {
@@ -19540,9 +19600,16 @@ var ZenFSGitee = (() => {
       }
       const sidecarPath = mtimePathFor(path);
       const sidecarContent = new TextEncoder().encode(String(mtimeMs));
-      const existingSidecarSha = this.shaCache.get(sidecarPath);
       this._queue(
-        (existingSidecarSha ? this.api.updateFile(sidecarPath, sidecarContent, existingSidecarSha, `Update sidecar for ${path}`) : this.api.createFile(sidecarPath, sidecarContent, `Create sidecar for ${path}`)).then((newSha) => {
+        (async () => {
+          const cachedSidecarSha = this.shaCache.get(sidecarPath);
+          const cachedSidecarContent = this.contentCache.get(sidecarPath);
+          if (cachedSidecarSha && cachedSidecarContent && bytesEqual(cachedSidecarContent, sidecarContent)) {
+            return cachedSidecarSha;
+          }
+          const existingSidecarSha = cachedSidecarSha ?? await this.ensureSha(sidecarPath);
+          return existingSidecarSha ? this.api.updateFile(sidecarPath, sidecarContent, existingSidecarSha, `Update sidecar for ${path}`) : this.api.createFile(sidecarPath, sidecarContent, `Create sidecar for ${path}`);
+        })().then((newSha) => {
           this.shaCache.set(sidecarPath, newSha);
           this._persistSha(sidecarPath, newSha);
         }).catch(() => {
@@ -19559,6 +19626,23 @@ var ZenFSGitee = (() => {
       }
     }
     // --- WriteFile override (forward { mtime } into the sidecar) ---
+    /**
+     * 预热 shaCache：写入 sidecar / 元数据前，如果本地没有该路径的 blob SHA，
+     * 先向远端探测一次。冷缓存（例如刚被 sidecar 清理删掉、进程重启、或其它
+     * 设备先写过该路径）下直接 POST 会被 Gitee 以 400「文件名已存在」拒绝；
+     * 预热后可稳定走 PUT，不把一次无谓失败升级为后端错误状态。
+     */
+    async ensureSha(path) {
+      const cached = this.shaCache.get(path);
+      if (cached) return cached;
+      const sha = await this.api.getFileSha(path).catch(() => null);
+      if (sha) {
+        this.shaCache.set(path, sha);
+        this._persistSha(path, sha);
+        return sha;
+      }
+      return void 0;
+    }
     /**
      * Override base `writeFile` so an optional `{ mtime }` option is forwarded
      * to `write()` and persisted in the `.mtime` sidecar. This is what makes
@@ -19625,7 +19709,7 @@ var ZenFSGitee = (() => {
       const neg = this.noSidecarCache.get(path);
       if (neg === void 0 || Date.now() - neg > NO_SIDECAR_TTL_MS) {
         try {
-          const sidecarData = this.contentCache.get(sidecarPath) || await this.api.getRaw(sidecarPath);
+          const sidecarData = this.contentCache.get(sidecarPath) || await this.api.getRaw(sidecarPath, { quiet404: true });
           const sidecarBytes = sidecarData instanceof Uint8Array ? sidecarData : new Uint8Array(sidecarData);
           if (!this.contentCache.has(sidecarPath)) {
             this.contentCache.set(sidecarPath, sidecarBytes);
@@ -19647,7 +19731,7 @@ var ZenFSGitee = (() => {
         }
       }
       if (currentSha) {
-        const commit = await this.api.getLastCommit(path);
+        const commit = await this.api.getLastCommit(path).catch(() => null);
         if (commit) {
           const mtimeEntry = { sha: currentSha, lastModified: commit.date, fromSidecar: false };
           this.mtimeCache.set(path, mtimeEntry);
@@ -19702,16 +19786,20 @@ var ZenFSGitee = (() => {
       }
       if (sidecarToDataPath(path) === null) {
         const existingSidecarSha = this.shaCache.get(sidecarPath);
-        let newSidecarSha;
-        if (existingSidecarSha) {
-          newSidecarSha = await this.api.updateFile(sidecarPath, sidecarContent, existingSidecarSha, `Update sidecar for ${path}`);
-        } else {
-          newSidecarSha = await this.api.createFile(sidecarPath, sidecarContent, `Create sidecar for ${path}`);
+        const cachedSidecarContent = this.contentCache.get(sidecarPath);
+        const sidecarUnchanged = !!(existingSidecarSha && cachedSidecarContent && bytesEqual(cachedSidecarContent, sidecarContent));
+        if (!sidecarUnchanged) {
+          let newSidecarSha;
+          if (existingSidecarSha) {
+            newSidecarSha = await this.api.updateFile(sidecarPath, sidecarContent, existingSidecarSha, `Update sidecar for ${path}`);
+          } else {
+            newSidecarSha = await this.api.createFile(sidecarPath, sidecarContent, `Create sidecar for ${path}`);
+          }
+          this.contentCache.set(sidecarPath, sidecarContent);
+          this._persistContent(sidecarPath, sidecarContent);
+          this.shaCache.set(sidecarPath, newSidecarSha);
+          this._persistSha(sidecarPath, newSidecarSha);
         }
-        this.contentCache.set(sidecarPath, sidecarContent);
-        this._persistContent(sidecarPath, sidecarContent);
-        this.shaCache.set(sidecarPath, newSidecarSha);
-        this._persistSha(sidecarPath, newSidecarSha);
       } else {
         log3.warn(`writeFileWithMtime: refusing to write nested mtime sidecar for ${path} (already a .mtime sidecar)`);
       }
@@ -19939,7 +20027,7 @@ var ZenFSGitee = (() => {
     // ---------------------------------------------------------------------
     async readdir(path) {
       const names = await super.readdir(path);
-      return names.filter((n) => n !== ".keep");
+      return names.filter((n) => n !== ".keep" && !n.endsWith(".mtime"));
     }
     async mkdir(path, options) {
       const opts = options ?? { mode: S_IFDIR | 493 };

@@ -17819,11 +17819,11 @@ var ZenFSRemoteStorage = (() => {
     touch: "mtime",
     link: "mtime"
   };
-  function createLogger2(backendName) {
+  function createLogger2(backendName, scope = "/") {
     const log2 = (method, path, detail) => {
       const area = methodToArea[method] ?? "meta";
       const logger = loggers[area];
-      const parts = [`[RS:${backendName}] ${method} path=${path}`];
+      const parts = [`${method} path=${path} backend=${backendName} scope=${scope}`];
       if (detail) {
         for (const [k, v] of Object.entries(detail)) {
           parts.push(`${k}=${truncate3(v)}`);
@@ -17835,7 +17835,7 @@ var ZenFSRemoteStorage = (() => {
       const area = methodToArea[method] ?? "meta";
       const logger = loggers[area];
       const status = ok ? "OK" : "ERR";
-      logger.log(`[RS:${backendName}] ${method} path=${path} \u2192 ${status} ${truncate3(result)}`);
+      logger.log(`${method} path=${path} backend=${backendName} scope=${scope} \u2192 ${status} ${truncate3(result)}`);
     };
     return { log: log2, logResult };
   }
@@ -18158,12 +18158,13 @@ var ZenFSRemoteStorage = (() => {
       /** Debounced save handle. */
       this.saveTimer = null;
       this.backendName = `RemoteStorage@${config.href.replace(/^https?:\/\//, "")}`;
-      this.logger = createLogger2(this.backendName);
       this.baseUrl = config.href.endsWith("/") ? config.href.slice(0, -1) : config.href;
       let bp = config.basePath || "";
       if (bp && !bp.startsWith("/")) bp = "/" + bp;
       if (bp && !bp.endsWith("/")) bp = bp + "/";
       this.config = { ...config, basePath: bp };
+      this.backendScope = bp || "/";
+      this.logger = createLogger2(this.backendName, this.backendScope);
       const srp = bp ? "/" : "app_data/";
       this.syncRootPath = srp.endsWith("/") ? srp : srp + "/";
       this.headers = new Headers({
@@ -18228,15 +18229,23 @@ var ZenFSRemoteStorage = (() => {
       };
     }
     /**
-     * Build full URL for a path
+     * Resolve the remote URL for a path without logging (used by log lines that
+     * need to show the real object address alongside the Fs-relative path).
      */
-    buildUrl(path) {
+    urlFor(path) {
       const basePath = this.config.basePath || "";
       const normalizedPath = normalizePath2(path);
       const isDir = path === "/" || path.endsWith("/");
       const suffix = normalizedPath ? "/" + normalizedPath + (isDir ? "/" : "") : isDir ? "/" : "";
       const fullPath = basePath.endsWith("/") && suffix.startsWith("/") ? basePath + suffix.slice(1) : basePath + suffix;
-      const url = this.baseUrl + fullPath;
+      return this.baseUrl + fullPath;
+    }
+    /**
+     * Build full URL for a path
+     */
+    buildUrl(path) {
+      const url = this.urlFor(path);
+      const isDir = path === "/" || path.endsWith("/");
       this.logger.log("buildUrl", path, { isDir, url });
       return url;
     }
@@ -18252,15 +18261,16 @@ var ZenFSRemoteStorage = (() => {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), this.timeout);
         try {
+          const mergedHeaders = new Headers({
+            "Authorization": `Bearer ${this.config.token}`,
+            "Content-Type": "application/json",
+            ...this.config.headers
+          });
+          new Headers(options.headers).forEach((value, key) => mergedHeaders.set(key, value));
           const response = await fetch(url, {
             ...options,
             credentials: "omit",
-            headers: {
-              "Authorization": `Bearer ${this.config.token}`,
-              "Content-Type": "application/json",
-              ...this.config.headers,
-              ...options.headers
-            },
+            headers: mergedHeaders,
             signal: controller.signal
           });
           clearTimeout(timeoutId);
@@ -18326,43 +18336,43 @@ var ZenFSRemoteStorage = (() => {
       this.logger.log("exists", path);
       const normalized = normalizePath2(path);
       await this.ensureCacheLoaded();
-      loggers.exists.log(`[RS-EXISTS] exists(${path}) backend=${this.backendName}`);
-      loggers.exists.log(`[RS-EXISTS]   cache state: ${this.dumpCacheState(path)}`);
+      loggers.exists.log(`exists(${path}) backend=${this.backendName} scope=${this.backendScope}`);
+      loggers.exists.log(`exists(${path}) cacheState=${this.dumpCacheState(path)}`);
       const cached = this.existenceCache.get(normalized);
       if (cached) {
         if (cached.exists) {
           if (Date.now() - cached.ts < _RemoteStorageFileSystem.POSITIVE_CACHE_TTL) {
-            loggers.exists.log(`[RS-EXISTS]   \u2192 true (existenceCache HIT: positive, age=${Date.now() - cached.ts}ms < ${_RemoteStorageFileSystem.POSITIVE_CACHE_TTL}ms)`);
+            loggers.exists.log(`exists(${path}) result=true source=existenceCache-positive ageMs=${Date.now() - cached.ts} ttlMs=${_RemoteStorageFileSystem.POSITIVE_CACHE_TTL}`);
             this.logger.logResult("exists", path, true, true);
             return true;
           }
-          loggers.exists.log(`[RS-EXISTS]   existenceCache positive EXPIRED (age=${Date.now() - cached.ts}ms), falling through to stat()`);
+          loggers.exists.log(`exists(${path}) cache=positive-expired ageMs=${Date.now() - cached.ts} next=stat`);
         } else {
           if (Date.now() - cached.ts < _RemoteStorageFileSystem.NEGATIVE_CACHE_TTL) {
-            loggers.exists.log(`[RS-EXISTS]   \u2192 false (existenceCache HIT: negative, age=${Date.now() - cached.ts}ms < ${_RemoteStorageFileSystem.NEGATIVE_CACHE_TTL}ms)`);
+            loggers.exists.log(`exists(${path}) result=false source=existenceCache-negative ageMs=${Date.now() - cached.ts} ttlMs=${_RemoteStorageFileSystem.NEGATIVE_CACHE_TTL}`);
             this.logger.logResult("exists", path, false, true);
             return false;
           }
-          loggers.exists.log(`[RS-EXISTS]   existenceCache negative EXPIRED (age=${Date.now() - cached.ts}ms), falling through to stat()`);
+          loggers.exists.log(`exists(${path}) cache=negative-expired ageMs=${Date.now() - cached.ts} next=stat`);
         }
       } else {
-        loggers.exists.log(`[RS-EXISTS]   existenceCache MISS for ${normalized}, calling stat()`);
+        loggers.exists.log(`exists(${path}) cache=miss normalized=${normalized} next=stat`);
       }
       try {
-        loggers.exists.log(`[RS-EXISTS]   calling stat(${path})...`);
+        loggers.exists.log(`exists(${path}) next=stat`);
         await this.stat(path);
         this.existenceCache.set(normalized, { exists: true, ts: Date.now() });
-        loggers.exists.log(`[RS-EXISTS]   \u2192 true (stat() succeeded, existenceCache updated)`);
+        loggers.exists.log(`exists(${path}) result=true source=stat cache=updated-positive`);
         this.logger.logResult("exists", path, true);
         return true;
       } catch (error) {
         if (error instanceof FileNotFoundError) {
           this.existenceCache.set(normalized, { exists: false, ts: Date.now() });
-          loggers.exists.log(`[RS-EXISTS]   \u2192 false (stat() threw FileNotFoundError, existenceCache updated)`);
+          loggers.exists.log(`exists(${path}) result=false source=stat error=FileNotFoundError cache=updated-negative`);
           this.logger.logResult("exists", path, false);
           return false;
         }
-        loggers.exists.log(`[RS-EXISTS]   \u2192 ERROR: ${error instanceof Error ? error.message : String(error)}`);
+        loggers.exists.log(`exists(${path}) result=error message=${error instanceof Error ? error.message : String(error)}`);
         this.logger.logResult("exists", path, error, false);
         throw error;
       }
@@ -18410,6 +18420,7 @@ var ZenFSRemoteStorage = (() => {
       }
       const url = this.buildUrl(path);
       try {
+        await this.ensureParentDirectories(path);
         let body;
         let contentType;
         if (typeof data === "string") {
@@ -18462,6 +18473,46 @@ var ZenFSRemoteStorage = (() => {
       }
     }
     /**
+     * 写入前逐级确保父目录存在。
+     *
+     * RemoteStorage 要求父目录先存在，直接 PUT 一个深层文件（例如
+     * `.meta/backends/x.json`）会被服务端拒绝并返回 “no such file or
+     * directory”。这里从最外层开始逐级探测，缺失的目录用
+     * `Content-Type: application/x-directory` 的 PUT 创建，已存在的目录直接跳过。
+     */
+    async ensureParentDirectories(path) {
+      const parent = getParentPath(path);
+      if (!parent) return;
+      let current = "";
+      for (const segment of parent.split("/")) {
+        current = current ? `${current}/${segment}` : segment;
+        const dirPath = `/${current}/`;
+        if (await this.exists(dirPath)) continue;
+        try {
+          await this.createRemoteDirectory(dirPath);
+        } catch (error) {
+          if (error instanceof AuthenticationError || error instanceof PermissionDeniedError) {
+            throw error;
+          }
+        }
+      }
+    }
+    /**
+     * 用 remoteStorage 的目录 PUT（`application/x-directory`）创建一个目录。
+     * 409 表示并发创建，目标状态已达成，视为成功。
+     */
+    async createRemoteDirectory(dirPath) {
+      const url = this.buildUrl(ensureDirectoryPath(dirPath));
+      const headers = new Headers(this.headers);
+      headers.set("Content-Type", "application/x-directory");
+      const response = await this.makeRequest(url, { method: "PUT", body: "", headers });
+      if (!response.ok && response.status !== 409) {
+        this.handleHttpError(response, dirPath, "mkdir");
+      }
+      this.existenceCache.set(normalizePath2(dirPath), { exists: true, ts: Date.now() });
+      this.logger.logResult("mkdir", dirPath, "auto-created for nested write");
+    }
+    /**
      * Write file with precise mtime — implements SyncableFS.writeFileWithMtime.
      *
      * Delegates to writeFile() with { mtime } option. When preciseMtime is
@@ -18487,23 +18538,25 @@ var ZenFSRemoteStorage = (() => {
       path = this.validateAndNormalizePath(path);
       const normalized = normalizePath2(path);
       const existCached = this.existenceCache.get(normalized);
-      loggers.delete.log(`[RS-UNLINK] unlink(${path}) backend=${this.backendName} normalized=${normalized} existenceCache \u2192 ${existCached ? `exists=${existCached.exists} age=${Date.now() - existCached.ts}ms` : "MISS"}`);
-      loggers.delete.log(`[RS-UNLINK]   cache state: ${this.dumpCacheState(path)}`);
+      const targetUrl = this.urlFor(path);
+      const cacheDesc = existCached ? `hit exists=${existCached.exists} ageMs=${Date.now() - existCached.ts}` : "miss";
+      loggers.delete.log(
+        `unlink path=${path} normalized=${normalized} backend=${this.backendName} scope=${this.backendScope} url=${targetUrl} cache=${cacheDesc} state=${this.dumpCacheState(path)}`
+      );
       if (existCached && !existCached.exists) {
         if (Date.now() - existCached.ts < _RemoteStorageFileSystem.NEGATIVE_CACHE_TTL) {
-          loggers.delete.log(`[RS-UNLINK] unlink(${path}): SKIPPED (existence cache: not found, within TTL)`);
+          loggers.delete.log(`unlink path=${path} result=skipped reason=negative-cache ttlMs=${_RemoteStorageFileSystem.NEGATIVE_CACHE_TTL}`);
           this.logger.logResult("unlink", path, "skipped (existence cache: not found)");
           return;
         }
-        loggers.delete.log(`[RS-UNLINK] unlink(${path}): negative cache expired, proceeding to DELETE`);
+        loggers.delete.log(`unlink path=${path} phase=delete reason=negative-cache-expired`);
       }
-      loggers.delete.log(`[RS-UNLINK] unlink(${path}): sending DELETE`);
       try {
         const url = this.buildUrl(path);
         const response = await this.makeRequest(url, { method: "DELETE" });
-        loggers.delete.log(`[RS-UNLINK] unlink(${path}): DELETE response status=${response.status}`);
+        loggers.delete.log(`unlink path=${path} phase=delete status=${response.status}`);
         if (response.status === 404) {
-          loggers.delete.log(`[RS-UNLINK] unlink(${path}): 404 \u2014 already deleted, treating as success`);
+          loggers.delete.log(`unlink path=${path} phase=delete status=404 result=already-deleted`);
           this.logger.logResult("unlink", path, "404 \u2014 already deleted, treating as success");
           this.removeFromExistenceCache(path);
           const parentPath2 = getParentPath(path);
@@ -18561,7 +18614,7 @@ var ZenFSRemoteStorage = (() => {
             !dataName || !entryNames.has(dataName);
             if (orphaned) {
               const full = `${path}${name}`;
-              loggers.dir.log(`[RS-READDIR] pruning orphaned mtime sidecar: ${full}`);
+              loggers.dir.log(`pruning orphaned mtime sidecar: ${full}`);
               void this.unlink(full).catch(() => {
               });
             }
@@ -18569,7 +18622,7 @@ var ZenFSRemoteStorage = (() => {
           }
           names.push(name);
         }
-        loggers.dir.log(`[RS-READDIR] readdir(${path}) backend=${this.backendName}: ${entries2.size} entries, returning ${names.length} visible names`);
+        loggers.dir.log(`readdir(${path}) backend=${this.backendName} scope=${this.backendScope}: ${entries2.size} entries, returning ${names.length} visible names`);
         this.logger.logResult("readdir", path, `count=${names.length} [${names.join(", ")}]`);
         this.existenceCache.set(normalizePath2(path), { exists: true, ts: Date.now() });
         return names;
@@ -18947,8 +19000,8 @@ var ZenFSRemoteStorage = (() => {
       await this.ensureCacheLoaded();
       const callerSaysDir = path.endsWith("/");
       const baseName = getBasename(path);
-      loggers.stat.log(`[RS-STAT] stat ENTER(${path}) backend=${this.backendName} baseName=${baseName} callerSaysDir=${callerSaysDir}`);
-      loggers.stat.log(`[RS-STAT]   cache state: ${this.dumpCacheState(path)}`);
+      loggers.stat.log(`stat ENTER(${path}) backend=${this.backendName} scope=${this.backendScope} baseName=${baseName} callerSaysDir=${callerSaysDir}`);
+      loggers.stat.log(`stat(${path}) cacheState=${this.dumpCacheState(path)}`);
       let existsViaDir = false;
       let isDirViaDir = false;
       let dirListingAvailable = false;
@@ -18960,9 +19013,9 @@ var ZenFSRemoteStorage = (() => {
         try {
           entries2 = await this.ensureDirListing(parentDir);
           const listingAge = this.getDirListingAge(parentDir);
-          loggers.stat.log(`[RS-STAT] stat(${path}): ensureDirListing(${parentDir}) \u2192 ${entries2 ? `${entries2.size} entries, age=${listingAge}ms` : "null (dir not found)"}`);
+          loggers.stat.log(`stat(${path}): ensureDirListing(${parentDir}) \u2192 ${entries2 ? `${entries2.size} entries, age=${listingAge}ms` : "null (dir not found)"}`);
         } catch (err2) {
-          loggers.stat.log(`[RS-STAT] stat(${path}): ensureDirListing(${parentDir}) FAILED: ${err2}`);
+          loggers.stat.log(`stat(${path}): ensureDirListing(${parentDir}) FAILED: ${err2}`);
           entries2 = null;
         }
         if (entries2) {
@@ -18971,9 +19024,9 @@ var ZenFSRemoteStorage = (() => {
           if (cachedEntry) {
             existsViaDir = true;
             isDirViaDir = cachedEntry.isDir;
-            loggers.stat.log(`[RS-STAT] stat(${path}): FOUND in dir listing (isDir=${isDirViaDir}, size=${cachedEntry.size ?? "undefined"})`);
+            loggers.stat.log(`stat(${path}): FOUND in dir listing (isDir=${isDirViaDir}, size=${cachedEntry.size ?? "undefined"})`);
           } else {
-            loggers.stat.log(`[RS-STAT] stat(${path}): NOT in dir listing (entries: ${[...entries2.keys()].join(", ")})`);
+            loggers.stat.log(`stat(${path}): NOT in dir listing (entries: ${[...entries2.keys()].join(", ")})`);
           }
         }
       }
@@ -18982,11 +19035,11 @@ var ZenFSRemoteStorage = (() => {
         const parentDir = parentPath ? `/${parentPath}/` : "/";
         const listingAge = this.getDirListingAge(parentDir);
         if (listingAge !== null && listingAge < _RemoteStorageFileSystem.DIR_LISTING_TTL) {
-          loggers.stat.log(`[RS-STAT] stat(${path}): \u2192 FileNotFoundError (not in dir listing, age=${listingAge}ms < ${_RemoteStorageFileSystem.DIR_LISTING_TTL}ms)`);
+          loggers.stat.log(`stat(${path}): \u2192 FileNotFoundError (not in dir listing, age=${listingAge}ms < ${_RemoteStorageFileSystem.DIR_LISTING_TTL}ms)`);
           this.logger.logResult("stat", path, "FileNotFoundError (not in dir listing)", false);
           throw new FileNotFoundError(path);
         }
-        loggers.stat.log(`[RS-STAT] stat(${path}): not in STALE dir listing (age=${listingAge}ms >= ${_RemoteStorageFileSystem.POSITIVE_CACHE_TTL}ms), falling through to file GET probe`);
+        loggers.stat.log(`stat(${path}): not in STALE dir listing (age=${listingAge}ms >= ${_RemoteStorageFileSystem.POSITIVE_CACHE_TTL}ms), falling through to file GET probe`);
       }
       if (dirListingAvailable && !existsViaDir && !callerSaysDir) {
         const listingAge = this.getDirListingAge(
@@ -18994,7 +19047,7 @@ var ZenFSRemoteStorage = (() => {
         );
         const stale = listingAge === null || listingAge >= _RemoteStorageFileSystem.DIR_LISTING_TTL;
         if (stale) {
-          loggers.stat.log(`[RS-STAT] stat(${path}): stale listing \u2014 probing file via GET ${this.buildUrl(path)}`);
+          loggers.stat.log(`stat(${path}): stale listing \u2014 probing file via GET ${this.buildUrl(path)}`);
           try {
             const fileResp = await this.makeRequest(this.buildUrl(path), { method: "GET" });
             if (fileResp.ok) {
@@ -19008,7 +19061,7 @@ var ZenFSRemoteStorage = (() => {
                   const preciseMtime = await this.readMtimeSidecar(path);
                   if (preciseMtime !== void 0) mtime = preciseMtime;
                 }
-                loggers.stat.log(`[RS-STAT] stat(${path}): returning via file GET (size=${size}), setting existenceCache=true`);
+                loggers.stat.log(`stat(${path}): returning via file GET (size=${size}), setting existenceCache=true`);
                 this.existenceCache.set(normalizePath2(path), { exists: true, ts: Date.now() });
                 return {
                   ino: 0,
@@ -19026,7 +19079,7 @@ var ZenFSRemoteStorage = (() => {
             } else if (fileResp.status === 401 || fileResp.status === 403) {
               this.handleHttpError(fileResp, path, "stat");
             } else if (fileResp.status === 404) {
-              loggers.stat.log(`[RS-STAT] stat(${path}): file GET 404 \u2014 confirmed not found, setting existenceCache=false`);
+              loggers.stat.log(`stat(${path}): file GET 404 \u2014 confirmed not found, setting existenceCache=false`);
               this.existenceCache.set(normalizePath2(path), { exists: false, ts: Date.now() });
               throw new FileNotFoundError(path);
             }
@@ -19038,7 +19091,7 @@ var ZenFSRemoteStorage = (() => {
       }
       if (existsViaDir && isDirViaDir) {
         this.logger.logResult("stat", path, `DIR mode=40755 (via dir listing)`);
-        loggers.stat.log(`[RS-STAT] stat(${path}): returning via dir listing (isDir), setting existenceCache=true`);
+        loggers.stat.log(`stat(${path}): returning via dir listing (isDir), setting existenceCache=true`);
         this.existenceCache.set(normalizePath2(path), { exists: true, ts: Date.now() });
         return {
           ino: 0,
@@ -19063,7 +19116,7 @@ var ZenFSRemoteStorage = (() => {
           }
         }
         this.logger.logResult("stat", path, `FILE mode=100644 (via dir listing, size=${size})`);
-        loggers.stat.log(`[RS-STAT] stat(${path}): returning via dir listing (file, size=${size}), setting existenceCache=true`);
+        loggers.stat.log(`stat(${path}): returning via dir listing (file, size=${size}), setting existenceCache=true`);
         this.existenceCache.set(normalizePath2(path), { exists: true, ts: Date.now() });
         return {
           ino: 0,
@@ -19080,18 +19133,18 @@ var ZenFSRemoteStorage = (() => {
       }
       const dirPath = path.endsWith("/") ? path : path + "/";
       const dirUrl = this.buildUrl(dirPath);
-      loggers.stat.log(`[RS-STAT] stat(${path}): trying dir probe GET ${dirUrl}`);
+      loggers.stat.log(`stat(${path}): trying dir probe GET ${dirUrl}`);
       try {
         const response = await this.makeRequest(dirUrl, {
           method: "GET",
           headers: { "Accept": "application/ld+json" }
         });
-        loggers.stat.log(`[RS-STAT] stat(${path}): dir probe response status=${response.status}`);
+        loggers.stat.log(`stat(${path}): dir probe response status=${response.status}`);
         if (response.ok) {
           const contentType = response.headers.get("content-type") || "";
           if (contentType.includes("application/ld+json") || contentType.includes("text/html")) {
             this.logger.logResult("stat", path, `DIR mode=40755 (via dir probe)`);
-            loggers.stat.log(`[RS-STAT] stat(${path}): returning via dir probe, setting existenceCache=true`);
+            loggers.stat.log(`stat(${path}): returning via dir probe, setting existenceCache=true`);
             this.existenceCache.set(normalizePath2(path), { exists: true, ts: Date.now() });
             return {
               ino: 0,
@@ -19116,7 +19169,7 @@ var ZenFSRemoteStorage = (() => {
         }
       }
       this.logger.logResult("stat", path, "FileNotFoundError", false);
-      loggers.stat.log(`[RS-STAT] stat(${path}): \u2192 FileNotFoundError (all paths exhausted)`);
+      loggers.stat.log(`stat(${path}): \u2192 FileNotFoundError (all paths exhausted)`);
       throw new FileNotFoundError(path);
     }
     /**
@@ -19393,17 +19446,17 @@ var ZenFSRemoteStorage = (() => {
       const key = normalizePath2(dirPath);
       const cached = this.dirListingCache.get(key);
       if (!cached) {
-        loggers.dir.log(`[RS-TTL] getCachedDirListing(${dirPath}) key=${key}: CACHE MISS (no entry)`);
+        loggers.dir.log(`getCachedDirListing(${dirPath}) key=${key}: CACHE MISS (no entry)`);
         return null;
       }
       const age = Date.now() - cached.ts;
       const ttl = _RemoteStorageFileSystem.DIR_LISTING_TTL;
       if (age >= ttl) {
-        loggers.dir.log(`[RS-TTL] getCachedDirListing(${dirPath}) key=${key}: EXPIRED (age=${age}ms >= TTL=${ttl}ms, ts=${cached.ts}, now=${Date.now()}) \u2192 deleting cache entry, will trigger network fetch`);
+        loggers.dir.log(`getCachedDirListing(${dirPath}) key=${key}: EXPIRED (age=${age}ms >= TTL=${ttl}ms, ts=${cached.ts}, now=${Date.now()}) \u2192 deleting cache entry, will trigger network fetch`);
         this.dirListingCache.delete(key);
         return null;
       }
-      loggers.dir.log(`[RS-TTL] getCachedDirListing(${dirPath}) key=${key}: FRESH (age=${age}ms < TTL=${ttl}ms, ts=${cached.ts}, now=${Date.now()}) \u2192 returning ${cached.entries.size} entries`);
+      loggers.dir.log(`getCachedDirListing(${dirPath}) key=${key}: FRESH (age=${age}ms < TTL=${ttl}ms, ts=${cached.ts}, now=${Date.now()}) \u2192 returning ${cached.entries.size} entries`);
       return cached.entries;
     }
     /**
@@ -19445,12 +19498,12 @@ var ZenFSRemoteStorage = (() => {
       await this.ensureCacheLoaded();
       const normalized = normalizePath2(dirPath);
       if (!normalized && !this.config.basePath && this.syncRootPath !== "/") {
-        loggers.dir.log(`[RS-DIR] ensureDirListing('${dirPath}') \u2192 redirect to syncRootPath '${this.syncRootPath}'`);
+        loggers.dir.log(`ensureDirListing('${dirPath}') \u2192 redirect to syncRootPath '${this.syncRootPath}'`);
         return this.ensureDirListing(this.syncRootPath);
       }
       const cached = this.getCachedDirListing(dirPath);
       if (cached) {
-        loggers.dir.log(`[RS-DIR] ensureDirListing(${dirPath}) backend=${this.backendName}: cache HIT (${cached.size} entries)`);
+        loggers.dir.log(`ensureDirListing(${dirPath}) backend=${this.backendName} scope=${this.backendScope}: cache HIT (${cached.size} entries)`);
         return cached;
       }
       const parentPath = getParentPath(normalized);
@@ -19461,32 +19514,32 @@ var ZenFSRemoteStorage = (() => {
           const baseName = getBasename(normalized);
           const entry = parentListing.get(baseName);
           if (entry && !entry.isDir) {
-            loggers.dir.log(`[RS-DIR] ensureDirListing(${dirPath}) backend=${this.backendName}: parent listing says "${baseName}" is a file (isDir=false), skipping fetch`);
+            loggers.dir.log(`ensureDirListing(${dirPath}) backend=${this.backendName} scope=${this.backendScope}: parent listing says "${baseName}" is a file (isDir=false), skipping fetch`);
             return null;
           }
           if (!entry) {
-            loggers.dir.log(`[RS-DIR] ensureDirListing(${dirPath}) backend=${this.backendName}: "${baseName}" not in parent listing, skipping fetch`);
+            loggers.dir.log(`ensureDirListing(${dirPath}) backend=${this.backendName} scope=${this.backendScope}: "${baseName}" not in parent listing, skipping fetch`);
             return null;
           }
-          loggers.dir.log(`[RS-DIR] ensureDirListing(${dirPath}) backend=${this.backendName}: parent listing confirms "${baseName}" is a directory, proceeding to fetch`);
+          loggers.dir.log(`ensureDirListing(${dirPath}) backend=${this.backendName} scope=${this.backendScope}: parent listing confirms "${baseName}" is a directory, proceeding to fetch`);
         }
         if (parentListing === null) {
-          loggers.dir.log(`[RS-DIR] ensureDirListing(${dirPath}) backend=${this.backendName}: parent directory "${parentDir}" does not exist, skipping fetch`);
+          loggers.dir.log(`ensureDirListing(${dirPath}) backend=${this.backendName} scope=${this.backendScope}: parent directory "${parentDir}" does not exist, skipping fetch`);
           return null;
         }
       }
       const dirUrl = this.buildUrl(ensureDirectoryPath(normalized));
       const previousEtag = this.getCachedDirEtag(normalized);
-      loggers.dir.log(`[RS-DIR] ensureDirListing(${dirPath}) backend=${this.backendName}: CACHE MISS (expired or not cached), fetching ${dirUrl} \u2014 previousEtag=${previousEtag ?? "null"}`);
-      loggers.sync.log(`[RS-SYNC] ensureDirListing NETWORK REQUEST: ${dirUrl} (dirPath=${dirPath}, previousEtag=${previousEtag ?? "null"})`);
+      loggers.dir.log(`ensureDirListing(${dirPath}) backend=${this.backendName} scope=${this.backendScope}: CACHE MISS (expired or not cached), fetching ${dirUrl} \u2014 previousEtag=${previousEtag ?? "null"}`);
+      loggers.sync.log(`ensureDirListing NETWORK REQUEST: ${dirUrl} (dirPath=${dirPath}, previousEtag=${previousEtag ?? "null"})`);
       const response = await this.makeRequest(dirUrl, {
         method: "GET",
         headers: { "Accept": "application/ld+json" }
       });
-      loggers.dir.log(`[RS-DIR] ensureDirListing(${dirPath}) backend=${this.backendName}: network response status=${response.status} etag=${response.headers.get("ETag") ?? "null"}`);
+      loggers.dir.log(`ensureDirListing(${dirPath}) backend=${this.backendName} scope=${this.backendScope}: network response status=${response.status} etag=${response.headers.get("ETag") ?? "null"}`);
       if (!response.ok) {
         if (response.status === 404) {
-          loggers.dir.log(`[RS-DIR] ensureDirListing(${dirPath}) backend=${this.backendName}: 404 \u2014 directory not found`);
+          loggers.dir.log(`ensureDirListing(${dirPath}) backend=${this.backendName} scope=${this.backendScope}: 404 \u2014 directory not found`);
           return null;
         }
         this.handleHttpError(response, normalized, "ensureDirListing");
@@ -19536,7 +19589,7 @@ var ZenFSRemoteStorage = (() => {
       }
       this.cacheDirListing(normalized, entries2, response.headers.get("ETag"));
       const result = this.getCachedDirListing(normalized);
-      loggers.dir.log(`[RS-DIR] ensureDirListing(${dirPath}) backend=${this.backendName}: fetched and cached ${entries2.length} entries (etag=${response.headers.get("ETag") ?? "null"})`);
+      loggers.dir.log(`ensureDirListing(${dirPath}) backend=${this.backendName} scope=${this.backendScope}: fetched and cached ${entries2.length} entries (etag=${response.headers.get("ETag") ?? "null"})`);
       return result;
     }
     /**
@@ -19549,16 +19602,16 @@ var ZenFSRemoteStorage = (() => {
       const key = normalizePath2(parentDir);
       const cached = this.dirListingCache.get(key);
       if (!cached) {
-        loggers.dir.log(`[RS-PATCH] patchDirListingEntry(${parentDir}, ${name}, ${entry ? "add" : "delete"}) backend=${this.backendName}: dir NOT in cache, nothing to patch`);
+        loggers.dir.log(`patchDirListingEntry(${parentDir}, ${name}, ${entry ? "add" : "delete"}) backend=${this.backendName} scope=${this.backendScope}: dir NOT in cache, nothing to patch`);
         return;
       }
       if (entry === null) {
         const had = cached.entries.has(name);
         cached.entries.delete(name);
-        loggers.dir.log(`[RS-PATCH] patchDirListingEntry(${parentDir}, ${name}, DELETE) backend=${this.backendName}: hadEntry=${had}, remaining entries=[${[...cached.entries.keys()].join(",")}], scheduling save`);
+        loggers.dir.log(`patchDirListingEntry(${parentDir}, ${name}, DELETE) backend=${this.backendName} scope=${this.backendScope}: hadEntry=${had}, remaining entries=[${[...cached.entries.keys()].join(",")}], scheduling save`);
       } else {
         cached.entries.set(name, entry);
-        loggers.dir.log(`[RS-PATCH] patchDirListingEntry(${parentDir}, ${name}, ADD) backend=${this.backendName}: entries now=[${[...cached.entries.keys()].join(",")}], scheduling save`);
+        loggers.dir.log(`patchDirListingEntry(${parentDir}, ${name}, ADD) backend=${this.backendName} scope=${this.backendScope}: entries now=[${[...cached.entries.keys()].join(",")}], scheduling save`);
       }
       cached.ts = Date.now();
       this.scheduleSave();
@@ -19576,7 +19629,7 @@ var ZenFSRemoteStorage = (() => {
             const data = blob[this.cacheNamespace];
             if (data && typeof data === "object") {
               const parsed = data;
-              loggers.cache.log(`[RS-CACHE-LOAD] backend=${this.backendName} loading persisted dirListingCache from storage...`);
+              loggers.cache.log(`backend=${this.backendName} scope=${this.backendScope} loading persisted dirListingCache from storage...`);
               const now = Date.now();
               for (const [k, v] of Object.entries(parsed)) {
                 const m = /* @__PURE__ */ new Map();
@@ -19585,16 +19638,16 @@ var ZenFSRemoteStorage = (() => {
                 }
                 this.dirListingCache.set(k, { etag: v.etag, ts: v.ts, entries: m });
                 const age = now - v.ts;
-                loggers.cache.log(`[RS-CACHE-LOAD]   restored dir[${k}]: ${m.size} entries=[${[...m.keys()].join(",")}] originalAge=${age}ms (ts preserved) etag=${v.etag ?? "null"}`);
+                loggers.cache.log(`restored dir=${k} entries=${m.size} names=[${[...m.keys()].join(",")}] originalAgeMs=${age} etag=${v.etag ?? "null"}`);
               }
               this.logger.logResult("cache", "load", `restored ${this.dirListingCache.size} dirs`);
-              loggers.cache.log(`[RS-CACHE-LOAD] backend=${this.backendName} total ${this.dirListingCache.size} dirs restored`);
+              loggers.cache.log(`backend=${this.backendName} scope=${this.backendScope} total ${this.dirListingCache.size} dirs restored`);
             } else {
-              loggers.cache.log(`[RS-CACHE-LOAD] backend=${this.backendName} no persisted cache data found`);
+              loggers.cache.log(`backend=${this.backendName} scope=${this.backendScope} no persisted cache data found`);
             }
           } catch (err2) {
             this.logger.logResult("cache", "load", err2, false);
-            loggers.cache.log(`[RS-CACHE-LOAD] backend=${this.backendName} FAILED to load: ${err2}`);
+            loggers.cache.log(`backend=${this.backendName} scope=${this.backendScope} FAILED to load: ${err2}`);
           }
         })();
       }
@@ -19606,10 +19659,10 @@ var ZenFSRemoteStorage = (() => {
     scheduleSave() {
       if (!this.persistCache || !this.storage) return;
       if (this.saveTimer) {
-        loggers.cache.log(`[RS-CACHE-SAVE] scheduleSave backend=${this.backendName}: timer already pending (debounce), skipping`);
+        loggers.cache.log(`scheduleSave backend=${this.backendName} scope=${this.backendScope}: timer already pending (debounce), skipping`);
         return;
       }
-      loggers.cache.log(`[RS-CACHE-SAVE] scheduleSave backend=${this.backendName}: scheduling flushSave in 500ms`);
+      loggers.cache.log(`scheduleSave backend=${this.backendName} scope=${this.backendScope}: scheduling flushSave in 500ms`);
       this.saveTimer = setTimeout(() => {
         this.saveTimer = null;
         void this.flushSave();
@@ -19624,7 +19677,7 @@ var ZenFSRemoteStorage = (() => {
       if (this.saveTimer) {
         clearTimeout(this.saveTimer);
         this.saveTimer = null;
-        loggers.cache.log(`[RS-CACHE-SAVE] flushSaveNow backend=${this.backendName}: cancelled pending debounce timer`);
+        loggers.cache.log(`flushSaveNow backend=${this.backendName} scope=${this.backendScope}: cancelled pending debounce timer`);
       }
       await this.flushSave();
     }
@@ -19642,10 +19695,10 @@ var ZenFSRemoteStorage = (() => {
         blob[this.cacheNamespace] = out;
         await this.storage.save(blob);
         const dirSummary = Object.entries(out).map(([k, v]) => `${k}:[${Object.keys(v.entries).join(",")}]`).join(" ");
-        loggers.cache.log(`[RS-CACHE-SAVE] flushSave backend=${this.backendName}: persisted ${this.dirListingCache.size} dirs \u2014 ${dirSummary}`);
+        loggers.cache.log(`flushSave backend=${this.backendName} scope=${this.backendScope}: persisted ${this.dirListingCache.size} dirs \u2014 ${dirSummary}`);
         this.logger.logResult("cache", "save", `persisted ${this.dirListingCache.size} dirs`);
       } catch (err2) {
-        loggers.cache.log(`[RS-CACHE-SAVE] flushSave backend=${this.backendName}: FAILED: ${err2}`);
+        loggers.cache.log(`flushSave backend=${this.backendName} scope=${this.backendScope}: FAILED: ${err2}`);
         this.logger.logResult("cache", "save", err2, false);
       }
     }
@@ -19799,16 +19852,16 @@ var ZenFSRemoteStorage = (() => {
      * skipping the expensive full tree walk.
      */
     async shouldSync() {
-      loggers.sync.log(`[RS-SYNC] shouldSync() called (snapshot=${this.snapshot === null ? "null" : `${this.snapshot.size} entries`}, rootEtag=${this.rootEtag ?? "null"})`);
+      loggers.sync.log(`shouldSync() called (snapshot=${this.snapshot === null ? "null" : `${this.snapshot.size} entries`}, rootEtag=${this.rootEtag ?? "null"})`);
       this.logger.log("shouldSync", "(snapshot check)");
       if (this.snapshot === null) {
         await this.loadSnapshotFromIDB();
         const snap = this.snapshot;
-        loggers.sync.log(`[RS-SYNC] shouldSync: after IDB restore \u2192 snapshot=${snap === null ? "null" : `${snap.size} entries`}, rootEtag=${this.rootEtag ?? "null"}`);
+        loggers.sync.log(`shouldSync: after IDB restore \u2192 snapshot=${snap === null ? "null" : `${snap.size} entries`}, rootEtag=${this.rootEtag ?? "null"}`);
         if (this.snapshot !== null && this.rootEtag !== null) {
-          loggers.sync.log(`[RS-SYNC] shouldSync: snapshot restored, fetching current root ETag to compare with stored rootEtag='${this.rootEtag}'`);
+          loggers.sync.log(`shouldSync: snapshot restored, fetching current root ETag to compare with stored rootEtag='${this.rootEtag}'`);
           const currentRootEtag2 = await this.fetchRootEtag();
-          loggers.sync.log(`[RS-SYNC] shouldSync: currentRootEtag='${currentRootEtag2 ?? "null"}' vs stored rootEtag='${this.rootEtag}' \u2192 ${currentRootEtag2 === this.rootEtag ? "SAME (no sync)" : "DIFFERENT (will sync)"}`);
+          loggers.sync.log(`shouldSync: currentRootEtag='${currentRootEtag2 ?? "null"}' vs stored rootEtag='${this.rootEtag}' \u2192 ${currentRootEtag2 === this.rootEtag ? "SAME (no sync)" : "DIFFERENT (will sync)"}`);
           if (currentRootEtag2 !== null && currentRootEtag2 === this.rootEtag) {
             this.logger.logResult("shouldSync", "", "false (snapshot restored from IDB, root ETag unchanged)");
             return false;
@@ -19817,24 +19870,24 @@ var ZenFSRemoteStorage = (() => {
           this.logger.logResult("shouldSync", "", "true (snapshot restored but root ETag changed)");
           return true;
         }
-        loggers.sync.log(`[RS-SYNC] shouldSync: no persisted snapshot, building from scratch`);
+        loggers.sync.log(`shouldSync: no persisted snapshot, building from scratch`);
         await this.buildSnapshot();
         this.logger.logResult("shouldSync", "", "true (first call, baseline built)");
         return true;
       }
-      loggers.sync.log(`[RS-SYNC] shouldSync: existing snapshot (${this.snapshot.size} entries), fetching current root ETag...`);
+      loggers.sync.log(`shouldSync: existing snapshot (${this.snapshot.size} entries), fetching current root ETag...`);
       const currentRootEtag = await this.fetchRootEtag();
       if (currentRootEtag === null) {
-        loggers.sync.log(`[RS-SYNC] shouldSync: currentRootEtag=null (unavailable) \u2192 returning true (sync)`);
+        loggers.sync.log(`shouldSync: currentRootEtag=null (unavailable) \u2192 returning true (sync)`);
         this.logger.logResult("shouldSync", "", "true (root ETag unavailable)");
         return true;
       }
-      loggers.sync.log(`[RS-SYNC] shouldSync: currentRootEtag='${currentRootEtag}' vs stored rootEtag='${this.rootEtag}' \u2192 ${currentRootEtag === this.rootEtag ? "SAME (no sync)" : "DIFFERENT (will sync)"}`);
+      loggers.sync.log(`shouldSync: currentRootEtag='${currentRootEtag}' vs stored rootEtag='${this.rootEtag}' \u2192 ${currentRootEtag === this.rootEtag ? "SAME (no sync)" : "DIFFERENT (will sync)"}`);
       if (currentRootEtag === this.rootEtag) {
         this.logger.logResult("shouldSync", "", "false (root ETag unchanged)");
         return false;
       }
-      loggers.sync.log(`[RS-SYNC] shouldSync: root ETag changed, rebuilding snapshot...`);
+      loggers.sync.log(`shouldSync: root ETag changed, rebuilding snapshot...`);
       await this.buildSnapshot();
       this.logger.logResult("shouldSync", "", "true (root ETag changed)");
       return true;
@@ -19850,15 +19903,15 @@ var ZenFSRemoteStorage = (() => {
      * token's scope while still serving as a reliable "did anything change?" check.
      */
     async fetchRootEtag() {
-      loggers.sync.log(`[RS-SYNC] fetchRootEtag() called for syncRootPath='${this.syncRootPath}'`);
+      loggers.sync.log(`fetchRootEtag() called for syncRootPath='${this.syncRootPath}'`);
       const cacheKey = normalizePath2(this.syncRootPath);
       const preCached = this.dirListingCache.get(cacheKey);
       if (preCached) {
         const age = Date.now() - preCached.ts;
         const expired = age >= _RemoteStorageFileSystem.DIR_LISTING_TTL;
-        loggers.sync.log(`[RS-SYNC] fetchRootEtag: cache BEFORE ensureDirListing \u2192 key=${cacheKey} age=${age}ms TTL=${_RemoteStorageFileSystem.DIR_LISTING_TTL}ms expired=${expired} etag=${preCached.etag ?? "null"}`);
+        loggers.sync.log(`fetchRootEtag: cache BEFORE ensureDirListing \u2192 key=${cacheKey} age=${age}ms TTL=${_RemoteStorageFileSystem.DIR_LISTING_TTL}ms expired=${expired} etag=${preCached.etag ?? "null"}`);
       } else {
-        loggers.sync.log(`[RS-SYNC] fetchRootEtag: cache BEFORE ensureDirListing \u2192 key=${cacheKey} NOT IN CACHE (will trigger network fetch)`);
+        loggers.sync.log(`fetchRootEtag: cache BEFORE ensureDirListing \u2192 key=${cacheKey} NOT IN CACHE (will trigger network fetch)`);
       }
       try {
         await this.ensureDirListing(this.syncRootPath);
@@ -19866,12 +19919,12 @@ var ZenFSRemoteStorage = (() => {
         const postCached = this.dirListingCache.get(cacheKey);
         if (postCached && preCached) {
           const wasRefreshed = postCached.ts !== preCached.ts;
-          loggers.sync.log(`[RS-SYNC] fetchRootEtag: cache AFTER ensureDirListing \u2192 ts_changed=${wasRefreshed} (pre=${preCached.ts} post=${postCached.ts}) \u2192 ${wasRefreshed ? "NETWORK FETCH occurred" : "CACHE HIT (no network request)"}`);
+          loggers.sync.log(`fetchRootEtag: cache AFTER ensureDirListing \u2192 ts_changed=${wasRefreshed} (pre=${preCached.ts} post=${postCached.ts}) \u2192 ${wasRefreshed ? "NETWORK FETCH occurred" : "CACHE HIT (no network request)"}`);
         }
-        loggers.sync.log(`[RS-SYNC] fetchRootEtag: returning etag=${etag ?? "null"}`);
+        loggers.sync.log(`fetchRootEtag: returning etag=${etag ?? "null"}`);
         return etag;
       } catch (e) {
-        loggers.sync.log(`[RS-SYNC] fetchRootEtag: FAILED: ${e}`);
+        loggers.sync.log(`fetchRootEtag: FAILED: ${e}`);
         this.logger.log("fetchRootEtag", this.syncRootPath, { error: String(e) });
         return null;
       }
@@ -19984,7 +20037,7 @@ var ZenFSRemoteStorage = (() => {
         for (const item of items) {
           const itemPath = dirPath === "/" ? item.name : `${dirPath}/${item.name}`;
           if (isMetadataSidecarToDelete(item.name)) {
-            loggers.dir.log(`[RS-SNAPSHOT] deleting stale dotfile: ${itemPath}`);
+            loggers.dir.log(`deleting stale dotfile: ${itemPath}`);
             void this.unlink(itemPath).catch(() => {
             });
             continue;
@@ -19993,7 +20046,7 @@ var ZenFSRemoteStorage = (() => {
             const dataName = sidecarToDataPath(item.name);
             const orphaned = item.name.endsWith(".mtime.mtime") || !dataName || !itemNames.has(dataName);
             if (orphaned) {
-              loggers.dir.log(`[RS-SNAPSHOT] pruning orphaned mtime sidecar: ${itemPath}`);
+              loggers.dir.log(`pruning orphaned mtime sidecar: ${itemPath}`);
               void this.unlink(itemPath).catch(() => {
               });
             }
